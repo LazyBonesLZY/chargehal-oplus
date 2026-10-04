@@ -299,9 +299,6 @@ pub const FASTCHG_MODE_PATHS: &[&str] = &[
     "/sys/class/qcom-battery/fastchg_mode",
     "/sys/class/power_supply/bms/fastcharge_mode",
 ];
-/// Short-circuit health value reported for batteries without a short-circuit
-/// node. Kept here as the single sysfs-side source of truth.
-pub const SHORT_CIRCUIT_HEALTHY: i32 = 1;
 pub const CHARGE_CONTROL_LIMIT_PATHS: &[&str] = &[
     "/sys/class/power_supply/battery/charge_control_limit",
     "/sys/class/qcom-battery/charge_control_limit",
@@ -315,47 +312,15 @@ pub const COOL_MODE_PATHS: &[&str] = &[
     "/sys/class/qcom-battery/cool_mode",
 ];
 pub const COOL_DOWN_PATHS: &[&str] = &["/sys/class/power_supply/battery/cool_down"];
-pub const CHARGE_STOP_THRESHOLD_PATHS: &[&str] = &[
-    "/sys/class/power_supply/battery/charge_limit",
-    "/sys/class/qcom-battery/charge_limit",
-    "/sys/class/power_supply/battery/charge_control_end_threshold",
-    "/sys/class/power_supply/battery/charge_stop_threshold",
-];
-pub const CHARGE_LIMIT_STATE_PATHS: &[&str] = &[
-    "/sys/class/power_supply/battery/smart_chg",
-    "/sys/class/qcom-battery/smart_chg",
-    "/sys/class/power_supply/battery/night_charging",
-    "/sys/class/qcom-battery/night_charging",
-];
 pub const INPUT_SUSPEND_PATHS: &[&str] = &[
     "/sys/class/power_supply/battery/input_suspend",
     "/sys/class/qcom-battery/input_suspend",
 ];
-pub const BYPASS_STATUS_PATHS: &[&str] = &[
-    "/sys/class/power_supply/battery/bypass_charging",
-    "/sys/class/qcom-battery/bypass_charging",
-    "/sys/class/power_supply/battery/bypass_charge",
-    "/sys/class/qcom-battery/bypass_charge",
-    "/sys/class/power_supply/battery/charge_bypass",
-    "/sys/class/qcom-battery/charge_bypass",
-];
 pub const CHARGE_CONTROL_LIMIT_RESTRICTED_FALLBACK: i32 = 15;
 pub const CHARGE_CONTROL_LIMIT_RELEASED: &str = "0";
-pub const CHARGE_LIMIT_HYSTERESIS_PERCENT: i32 = 1;
 pub const POWER_RECHECK_MIN_W: i32 = 30;
 pub const POWER_RECHECK_MAX_W: i32 = 35;
 pub const POWER_RECHECK_DELAY_MS: u64 = 10;
-pub const SCREEN_ON_POLL_INTERVAL: Duration = Duration::from_secs(1);
-pub const SCREEN_OFF_CHARGING_POLL_INTERVAL: Duration = Duration::from_secs(5);
-pub const SCREEN_OFF_IDLE_POLL_INTERVAL: Duration = Duration::from_secs(30);
-pub const FULL_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
-pub const SCREEN_WAKE_SCAN_DEFER: Duration = Duration::from_millis(750);
-pub const INITIAL_REFRESH_WAIT: Duration = Duration::from_millis(250);
-pub const SYNTHETIC_DECIMAL_MIN_CENTI: i32 = 5;
-pub const SYNTHETIC_DECIMAL_SEED_MAX_CENTI: i32 = 50;
-pub const SYNTHETIC_DECIMAL_MAX_CENTI: i32 = 99;
-pub const SYNTHETIC_DECIMAL_STEP_CENTI: i32 = 1;
-pub const SYNTHETIC_DECIMAL_MAX_STEP_CENTI: i32 = 3;
 
 // Individual qcom-battery nodes
 pub const CP_MASTER_IIN: &str = "/sys/class/qcom-battery/master_smb1396_iin";
@@ -379,15 +344,6 @@ pub const BATT_CONT_ONLINE: &str = "/sys/class/qcom-battery/battcont_online";
 pub const FG_AI: &str = "/sys/class/qcom-battery/fg1_ai";
 pub const FG_AVG_CURRENT: &str = "/sys/class/qcom-battery/fg1_avg_current";
 pub const FG_VENDOR: &str = "/sys/class/qcom-battery/fg_vendor";
-pub const UI_SOC_DECIMAL_PATHS: &[&str] = &[
-    "/proc/ui_soc_decimal",
-    "/sys/class/power_supply/bms/soc_decimal",
-    "/sys/class/qcom-battery/soc_decimal",
-];
-pub const UI_SOC_DECIMAL_RATE_PATHS: &[&str] = &[
-    "/sys/class/power_supply/bms/soc_decimal_rate",
-    "/sys/class/qcom-battery/soc_decimal_rate",
-];
 pub const FG_CELL1_VOL: &str = "/sys/class/qcom-battery/fg1_cell1_vol";
 pub const FG_CELL2_VOL: &str = "/sys/class/qcom-battery/fg1_cell2_vol";
 pub const FG_CELL1_RASCALE: &str = "/sys/class/qcom-battery/fg1_cell1_rascale";

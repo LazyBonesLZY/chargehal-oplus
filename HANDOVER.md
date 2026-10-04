@@ -70,10 +70,10 @@ vendor.oplus.hardware.charger.ICharger/default   （VINTF 版本 6，接口版�
 
 ```
 cargo fmt --all -- --check          干净
-cargo test --all-targets            38 passed / 0 failed
+cargo test --all-targets            40 passed / 0 failed
 cargo clippy --all-targets -- -D warnings   零告警
 ./tools/validate-static.sh          PASS
-ANDROID_NDK_HOME=<ndk29> ./build.sh release 成功（aarch64，1008K）
+ANDROID_NDK_HOME=<ndk29> ./build.sh release 成功（aarch64，1010K）
 ./tools/validate-static.sh dist/...  PASS
 ```
 
@@ -91,21 +91,40 @@ ANDROID_NDK_HOME=<ndk29> ./build.sh release 成功（aarch64，1008K）
 4. **私有节点单位未确认**。需要插真机读一次实际值才能定。
 5. **部分返回格式尚未对齐官方**，清单在 `FORMAT-CONTRACT.md` §7：
    - P1：13 个「恒空」方法（受限于 §5.3，收益低）
-   - P2：`healthd_update_ui_soc_decimal`（项目有合成小数电量逻辑，与官方直读节点不同，属产品决策）、`getWirelessTXEnable`（硬编码 `"disable"`）、`getQuickModeGain`（分隔符应为 `+`）、`getUsbCurrentEyeDiagram`（`model != 0` 时应返回异常码 −7）
+   - P2：已完成 `getUsbCurrentEyeDiagram`（`model != 0` 时抛异常码 −7）与 `getQuickModeGain`（分隔符为 `+`）；`healthd_update_ui_soc_decimal`（项目有合成小数电量逻辑，与官方直读节点不同，属产品决策）、`getWirelessTXEnable`（硬编码 `"disable"`）暂维持现状。
    - `getChgConfig` 的逐 flag 格式未枚举（官方是运行期函数表分发）
 6. **`getBatteryResistance` / `getBatteryThermaLevel` 语义在两侧不同**：171 读的是 pack 识别电阻 / 热控限流档位，不是电芯内阻 / 温度。桥接层按方法名直连会拿到错误量纲，`micharge.rs` 里对这两个 getter 刻意不调用（没有对应字段）。
-7. **证据样本在 `/tmp`**（`/tmp/oplus-charger/`、`/tmp/vendor-dump/`），会被系统清理，建议归档。
+7. **证据样本已归档**至 `chargehal-vendor-refs/oplus-v11` 与 `171/222`，免遭系统清理。
 
 ---
 
-## 6. 下一步建议
+## 6. 本轮审查与修复记录（2026-10-05）
+
+1. **修复 MiCharge HAL 离线时导致 poll worker 空转占满 CPU 的缺陷**：
+   - 原代码中，若 `proxy()` 为 None，`refresh()` 直接返回 `false`，导致轮询循环误判为屏幕唤醒打断并立刻 `request_refresh()` 死循环。
+   - 现 `MiChargeBackend` 内部集成 `fallback: SysfsBackend`，当 HAL proxy 离线时无缝委托 `fallback.refresh()`，彻底杜绝死循环空转。
+   - 同样在 `set_charge_control` 与 `power_source_changed` 中对离线 proxy 补充了 fallback 兜底。
+2. **补齐 MiCharge 路径下的快充与状态计算**：
+   - 每次 HAL 刷新后，自动执行 `classify_fast_charge`、`classify_charge_technology`、`classify_charge_state` 与 `estimate_remaining_time_seconds`，确保 `getFastCharge` 等接口不再恒为 0。
+   - 补充读取 HAL 未覆盖的标准 Linux `battery_status`、`battery_health`、`ac_online` 节点。
+   - 拔除电源时调用 `clear_fast_charge_session` 清理快充会话。
+3. **P2 格式契约对齐**：
+   - `getUsbCurrentEyeDiagram`：`model != 0` 时返回异常码 -7（`rsbinder::status::ExceptionCode::UnsupportedOperation`）。
+   - `getQuickModeGain`：默认值格式改为 `"%d+%d"`（`"0+0"`）。
+4. **清理冗余常量**：
+   - 清除 `src/backend/sysfs.rs` 中搬迁残留但未被使用的 18 个重复常量定义。
+5. **单元测试扩充**：
+   - 增加针对 `MiChargeBackend` 离线 fallback 行为及屏幕过渡中断的测试用例，单测总数增加至 40，全部通过。
+
+---
+
+## 7. 下一步建议
 
 按优先级：
 
 1. **真机验证 171**。`REQUIRE_CHARGING=1 MAX_WAKE_MS=1000 ./tools/validate-device.sh 10`，确认桥接连得上、服务不重启、唤醒延迟达标。
 2. **回填单位**。拿实测值确认 `xm_power/*` 私有节点的刻度，更新 `MICHARGE-MAPPING.md` §7 与 `micharge.rs` 里标着 unconfirmed 的注释。
-3. **补格式**。按 `FORMAT-CONTRACT.md` §7 的 P2 清单逐条对齐，重点是 `getUsbCurrentEyeDiagram` 的异常码语义（返回空串可能让客户端误判）。
-4. **（可选）HIDL 桥接**。若将来有架构统一需求，两条路径：纯 Rust 手工实现 HIDL 客户端（需从 `libhidlbase` 还原 `hidl_string` 编码与 `_hidl_cb` 回调机制 + 50 个方法的 transaction code），或写 C++ 薄层链接原厂接口库（需先重建 `.hal` 跑 `hidl-gen`）。
+3. **（可选）HIDL 桥接**。若将来有架构统一需求，两条路径：纯 Rust 手工实现 HIDL 客户端（需从 `libhidlbase` 还原 `hidl_string` 编码与 `_hidl_cb` 回调机制 + 50 个方法的 transaction code），或写 C++ 薄层链接原厂接口库（需先重建 `.hal` 跑 `hidl-gen`）。
 
 ---
 

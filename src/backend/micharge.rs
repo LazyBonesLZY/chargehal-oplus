@@ -103,6 +103,7 @@ use rsbinder::{hub, DeathRecipient, StatusCode, Strong, WIBinder};
 use crate::adapter::ChargerInfo;
 use crate::vendor::xiaomi::hardware::micharge::IMiCharge::IMiCharge as MiCharge;
 
+use super::sysfs::SysfsBackend;
 use super::ChargeBackend;
 
 /// Service instance registered by the Xiaomi vendor HAL.
@@ -137,6 +138,7 @@ pub struct MiChargeBackend {
     /// weak reference, so dropping this would silently disable death notices.
     death: Arc<MiChargeDeath>,
     probe: Mutex<ProbeSnapshot>,
+    fallback: SysfsBackend,
 }
 
 impl MiChargeBackend {
@@ -154,6 +156,7 @@ impl MiChargeBackend {
             alive,
             death,
             probe: Mutex::new(ProbeSnapshot::default()),
+            fallback: SysfsBackend::new(),
         };
         backend.attach()?;
         Ok(backend)
@@ -172,13 +175,20 @@ impl MiChargeBackend {
 
     /// Current proxy, reconnecting after a HAL restart.
     fn proxy(&self) -> Option<Strong<dyn MiCharge>> {
-        if self.alive.load(Ordering::Acquire) {
-            if let Some(proxy) = self.service.lock().as_ref() {
-                return Some(proxy.clone());
-            }
+        #[cfg(not(target_os = "android"))]
+        {
+            None
         }
-        self.attach().ok()?;
-        self.service.lock().clone()
+        #[cfg(target_os = "android")]
+        {
+            if self.alive.load(Ordering::Acquire) {
+                if let Some(proxy) = self.service.lock().as_ref() {
+                    return Some(proxy.clone());
+                }
+            }
+            self.attach().ok()?;
+            self.service.lock().clone()
+        }
     }
 }
 
@@ -196,7 +206,8 @@ impl ChargeBackend for MiChargeBackend {
             return false;
         }
         let Some(proxy) = self.proxy() else {
-            return false;
+            tracing::warn!("MiCharge HAL proxy unavailable; falling back to sysfs refresh");
+            return self.fallback.refresh(info, should_cancel);
         };
 
         // ── Battery stage ──
@@ -300,12 +311,46 @@ impl ChargeBackend for MiChargeBackend {
             fetch(&*proxy, |p| p.getWirelessChargingStatus()).as_deref(),
         );
 
+        if should_cancel() {
+            return false;
+        }
+
+        // 补充读取 HAL 未覆盖的标准 power_supply 属性
+        let batt_status_path = format!("{}/status", crate::backend::sysfs::PSY_BATTERY);
+        let batt_health_path = format!("{}/health", crate::backend::sysfs::PSY_BATTERY);
+        let ac_online_path = format!("{}/online", crate::backend::sysfs::PSY_AC);
+        crate::backend::sysfs::update_non_empty_string_from_paths(
+            &mut info.battery_status,
+            &[&batt_status_path],
+        );
+        crate::backend::sysfs::update_non_empty_string_from_paths(
+            &mut info.battery_health,
+            &[&batt_health_path],
+        );
+        crate::backend::sysfs::update_int_from_paths(&mut info.ac_online, &[&ac_online_path]);
+
+        if should_cancel() {
+            return false;
+        }
+
+        let charger_online =
+            info.usb_online != 0 || info.ac_online != 0 || info.wireless_online != 0;
+        if !charger_online {
+            crate::backend::sysfs::clear_fast_charge_session(info);
+        }
+
+        info.fast_charge_type = crate::backend::sysfs::classify_fast_charge(info);
+        info.charge_technology = crate::backend::sysfs::classify_charge_technology(info);
+        info.charge_state = crate::backend::sysfs::classify_charge_state(info);
+        info.remaining_time = crate::backend::sysfs::estimate_remaining_time_seconds(info);
+
         true
     }
 
     fn set_charge_control(&self, restrict: bool) {
         let Some(proxy) = self.proxy() else {
-            tracing::warn!("MiCharge HAL unavailable; charge control not applied");
+            tracing::warn!("MiCharge HAL unavailable; falling back to sysfs charge control");
+            self.fallback.set_charge_control(restrict);
             return;
         };
         let value = if restrict { "1" } else { "0" };
@@ -330,16 +375,19 @@ impl ChargeBackend for MiChargeBackend {
             match result {
                 Some(0) => {}
                 Some(status) => tracing::warn!("MiCharge {name}({value}) returned {status}"),
-                None => tracing::warn!("MiCharge {name}({value}) failed"),
+                None => {
+                    tracing::warn!("MiCharge {name}({value}) failed; trying sysfs fallback");
+                    self.fallback.set_charge_control(restrict);
+                }
             }
         }
     }
 
     fn power_source_changed(&self) -> bool {
         // Cheap probe only: four light getters, no full snapshot. A missing or
-        // dead binder must escalate (return true) so the adapter can recover.
+        // dead binder must escalate to fallback so the adapter can recover.
         let Some(proxy) = self.proxy() else {
-            return true;
+            return self.fallback.power_source_changed();
         };
         let (Some(dp_connected), Some(capacity), Some(quick_charge_type), Some(power_max)) = (
             fetch(&*proxy, |p| p.isDPConnected()),
@@ -347,7 +395,7 @@ impl ChargeBackend for MiChargeBackend {
             fetch(&*proxy, |p| p.getQuickChargeType()),
             fetch(&*proxy, |p| p.getChargingPowerMax()),
         ) else {
-            return true;
+            return self.fallback.power_source_changed();
         };
 
         let current = ProbeSnapshot {
@@ -507,5 +555,48 @@ mod tests {
         assert_eq!(normalize_power_value(67), 67);
         assert_eq!(normalize_power_value(67_000), 67);
         assert_eq!(normalize_power_value(67_000_000), 67);
+    }
+
+    #[test]
+    fn offline_proxy_falls_back_to_sysfs_without_spinning() {
+        use crate::adapter::ChargerInfo;
+        use crate::backend::ChargeBackend;
+
+        let backend = super::MiChargeBackend {
+            service: parking_lot::Mutex::new(None),
+            alive: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            death: std::sync::Arc::new(super::MiChargeDeath {
+                alive: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            }),
+            probe: parking_lot::Mutex::new(super::ProbeSnapshot::default()),
+            fallback: super::SysfsBackend::new(),
+        };
+
+        let mut info = ChargerInfo::default();
+        let completed = backend.refresh(&mut info, &|| false);
+        assert!(completed);
+
+        let cancelled = backend.refresh(&mut info, &|| true);
+        assert!(!cancelled);
+    }
+
+    #[test]
+    fn offline_proxy_delegates_power_source_and_control_to_fallback() {
+        use crate::backend::ChargeBackend;
+
+        let backend = super::MiChargeBackend {
+            service: parking_lot::Mutex::new(None),
+            alive: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            death: std::sync::Arc::new(super::MiChargeDeath {
+                alive: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            }),
+            probe: parking_lot::Mutex::new(super::ProbeSnapshot::default()),
+            fallback: super::SysfsBackend::new(),
+        };
+
+        // None proxy delegates to fallback.power_source_changed() without crashing
+        let _ = backend.power_source_changed();
+        backend.set_charge_control(true);
+        backend.set_charge_control(false);
     }
 }

@@ -496,7 +496,7 @@ pub struct Adapter {
     decimal_soc_seed: AtomicI32,
     decimal_soc_rate: AtomicI32,
     decimal_soc: Mutex<DecimalSocState>,
-    pub quick_mode_gain: Mutex<String>, // STUB: hardcoded "0,0"
+    pub quick_mode_gain: Mutex<String>, // STUB: hardcoded "0+0" (official format is "%d+%d")
     pub soh_debug_info: Mutex<String>,
 
     // ── Settable compatibility state for features absent from the Xiaomi kernel ──
@@ -550,7 +550,7 @@ impl Adapter {
             decimal_soc_seed: AtomicI32::new(0),
             decimal_soc_rate: AtomicI32::new(0),
             decimal_soc: Mutex::new(DecimalSocState::default()),
-            quick_mode_gain: Mutex::new("0,0".into()),
+            quick_mode_gain: Mutex::new("0+0".into()),
             soh_debug_info: Mutex::new(Adapter::build_soh_debug_info(&info)),
             bcc_anode_type: Mutex::new("0".into()),
             eis_switch_status: Mutex::new("0".into()),

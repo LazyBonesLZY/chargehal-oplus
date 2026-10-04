@@ -436,7 +436,12 @@ impl ICharger for ChargerBinderService {
         Ok(0)
     }
 
-    fn getUsbCurrentEyeDiagram(&self, _model: i32) -> BinderResult<String> {
+    fn getUsbCurrentEyeDiagram(&self, model: i32) -> BinderResult<String> {
+        // The official HAL service throws exception code -7 (UnsupportedOperation)
+        // when model != 0 (see chargehal-vendor-refs/FORMAT-CONTRACT.md §3).
+        if model != 0 {
+            return Err(rsbinder::status::ExceptionCode::UnsupportedOperation.into());
+        }
         Ok(self.adapter.usb_eye_diagram.lock().clone())
     }
 
