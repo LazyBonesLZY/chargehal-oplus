@@ -5,6 +5,19 @@ set -eu
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="${1:-$ROOT/dist/vendor.oplus.hardware.charger-V6-service}"
 
+ADAPTER="$ROOT/src/adapter.rs"
+SYSFS="$ROOT/src/backend/sysfs.rs"
+MICHARGE="$ROOT/src/backend/micharge.rs"
+BACKEND_MOD="$ROOT/src/backend/mod.rs"
+MICHARGE_AIDL="$ROOT/aidl/vendor/xiaomi/hardware/micharge/IMiCharge.aidl"
+
+fail() {
+    echo "error: $1" >&2
+    exit 1
+}
+
+# ── Interface metadata ──
+
 INTERFACE_VERSION="$(sed -n 's/^pub const INTERFACE_VERSION: i32 = \([0-9][0-9]*\);$/\1/p' "$ROOT/src/lib.rs")"
 VINTF_VERSION="$(sed -n 's/^[[:space:]]*<version>\([0-9][0-9]*\)<\/version>.*$/\1/p' "$ROOT/charger-hal-service.xml")"
 [ -n "$INTERFACE_VERSION" ]
@@ -13,104 +26,148 @@ VINTF_VERSION="$(sed -n 's/^[[:space:]]*<version>\([0-9][0-9]*\)<\/version>.*$/\
 
 if ! rg -q '^rsbinder = \{ version = "=0\.10\.0", features = \["android_10_plus"\] \}$' "$ROOT/Cargo.toml" \
     || ! rg -q '^rsbinder-aidl = "=0\.10\.0"$' "$ROOT/Cargo.toml"; then
-    echo "error: Binder dependency no longer enables Android 10 through 17 compatibility" >&2
-    exit 1
+    fail "Binder dependency no longer enables Android 10 through 17 compatibility"
 fi
+
+# ── Binder runtime scheduling ──
 
 if rg -n 'disable_background_scheduling|setpriority|nice\(' "$ROOT/src/main.rs"; then
-    echo "error: Binder runtime scheduling was modified" >&2
-    exit 1
+    fail "Binder runtime scheduling was modified"
 fi
 
-if ! rg -q '^const SCREEN_OFF_CHARGING_POLL_INTERVAL: Duration = Duration::from_secs\(5\);$' "$ROOT/src/adapter.rs" \
-    || ! rg -q '^const FULL_REFRESH_INTERVAL: Duration = Duration::from_secs\(30\);$' "$ROOT/src/adapter.rs" \
-    || ! rg -q '^const SCREEN_WAKE_SCAN_DEFER: Duration = Duration::from_millis\(750\);$' "$ROOT/src/adapter.rs"; then
-    echo "error: charging probe/full-refresh/wake-defer timing changed" >&2
-    exit 1
+# ── Polling cadence ──
+
+if ! rg -q '^const SCREEN_OFF_CHARGING_POLL_INTERVAL: Duration = Duration::from_secs\(5\);$' "$ADAPTER" \
+    || ! rg -q '^const FULL_REFRESH_INTERVAL: Duration = Duration::from_secs\(30\);$' "$ADAPTER" \
+    || ! rg -q '^const SCREEN_WAKE_SCAN_DEFER: Duration = Duration::from_millis\(750\);$' "$ADAPTER"; then
+    fail "charging probe/full-refresh/wake-defer timing changed"
 fi
 
-POLL_PRIORITY_BODY="$(sed -n '/fn lower_poll_thread_priority/,/^}/p' "$ROOT/src/adapter.rs")"
+POLL_PRIORITY_BODY="$(sed -n '/fn lower_poll_thread_priority/,/^}/p' "$ADAPTER")"
 if ! printf '%s\n' "$POLL_PRIORITY_BODY" | rg -q 'setpriority.*10'; then
-    echo "error: poll worker no longer yields to display work" >&2
-    exit 1
+    fail "poll worker no longer yields to display work"
 fi
 
-PROBE_BODY="$(sed -n '/fn power_source_probe_changed/,/^    }/p' "$ROOT/src/adapter.rs")"
+# ── Backend selection: vendor HAL first, kernel nodes as fallback ──
+
+[ -f "$MICHARGE" ] || fail "MiCharge HAL backend is missing"
+[ -f "$SYSFS" ] || fail "sysfs fallback backend is missing"
+
+if ! rg -q 'MiChargeBackend::connect\(\)' "$BACKEND_MOD"; then
+    fail "backend selection no longer probes the Xiaomi vendor HAL"
+fi
+if ! rg -q 'SysfsBackend::new\(\)' "$BACKEND_MOD"; then
+    fail "backend selection has no kernel-node fallback"
+fi
+# The HAL probe must only run on device: on the host there is no servicemanager.
+if ! rg -q -U 'cfg\(target_os = "android"\)[\s\S]{0,400}MiChargeBackend::connect' "$BACKEND_MOD"; then
+    fail "vendor HAL probe is no longer gated to Android builds"
+fi
+
+for impl_block in "fn refresh" "fn set_charge_control" "fn power_source_changed"; do
+    if ! rg -q "$impl_block" "$MICHARGE"; then
+        fail "MiCharge backend does not implement ${impl_block#fn }"
+    fi
+done
+
+# The bridge must not carry a panic path into a root service.
+if rg -n 'unwrap\(\)|expect\(|panic!\(|unreachable!\(' "$MICHARGE"; then
+    fail "panic path found in the MiCharge bridge backend"
+fi
+
+# The fallback backend must always be usable: it depends on nothing external.
+SYSFS_AVAILABLE_BODY="$(sed -n '/fn is_available/,/^    }/p' "$SYSFS")"
+if ! printf '%s\n' "$SYSFS_AVAILABLE_BODY" | rg -q 'true'; then
+    fail "sysfs fallback backend is no longer always available"
+fi
+
+# ── Xiaomi interface contract ──
+
+[ -f "$MICHARGE_AIDL" ] || fail "IMiCharge.aidl is missing"
+MICHARGE_METHODS="$(rg -c '^\s+(String|boolean|int) [A-Za-z][A-Za-z0-9]*\(' "$MICHARGE_AIDL")"
+if [ "$MICHARGE_METHODS" != "58" ]; then
+    fail "IMiCharge.aidl declares $MICHARGE_METHODS methods, expected 56 business + 2 metadata"
+fi
+if ! rg -q '^\s+String getBatteryAuthentic\(\);' "$MICHARGE_AIDL" \
+    || ! rg -q '^\s+int setBatteryCommonInfo\(in String key, in String value\);' "$MICHARGE_AIDL"; then
+    fail "IMiCharge.aidl method order no longer matches the device transaction codes"
+fi
+if ! rg -q 'vendor\.xiaomi\.hardware\.micharge\.IMiCharge/default' "$MICHARGE"; then
+    fail "MiCharge service name changed"
+fi
+
+# ── Screen-transition cancellation ──
+
+PROBE_BODY="$(sed -n '/fn power_source_probe_changed/,/^    }/p' "$SYSFS")"
 if printf '%s\n' "$PROBE_BODY" | rg 'poll_once|thread::sleep|write_'; then
-    echo "error: lightweight power-source probe became a full or blocking scan" >&2
-    exit 1
+    fail "lightweight power-source probe became a full or blocking scan"
 fi
 
-UEVENT_BODY="$(sed -n '/fn monitor_power_supply_uevents/,/^}/p' "$ROOT/src/adapter.rs")"
+if ! rg -q 'fn poll_once<F>.*should_cancel' "$SYSFS" \
+    || ! rg -q 'backend\.refresh' "$ADAPTER" \
+    || ! rg -q 'if !scan_completed' "$ADAPTER"; then
+    fail "full scans are no longer cancellable during screen transitions"
+fi
+
+WAKE_CANCEL_CHECKS="$(rg -c 'screen_wake_pending\.load\(Ordering::Acquire\)' "$ADAPTER")"
+if [ "$WAKE_CANCEL_CHECKS" -lt 4 ]; then
+    fail "scan tail no longer yields before cache publication and charge control"
+fi
+
+# ── uevent handling ──
+
+UEVENT_BODY="$(sed -n '/fn monitor_power_supply_uevents/,/^}/p' "$ADAPTER")"
 if ! printf '%s\n' "$UEVENT_BODY" | rg -q 'request_uevent_probe' \
     || printf '%s\n' "$UEVENT_BODY" | rg -q 'request_refresh'; then
-    echo "error: power-supply uevents can trigger an unfiltered full scan" >&2
-    exit 1
+    fail "power-supply uevents can trigger an unfiltered full scan"
 fi
-if ! rg -q -U 'uevent_probe_pending\s*\.swap' "$ROOT/src/adapter.rs"; then
-    echo "error: power-supply uevent bursts are no longer coalesced" >&2
-    exit 1
+if ! rg -q -U 'uevent_probe_pending\s*\.swap' "$ADAPTER"; then
+    fail "power-supply uevent bursts are no longer coalesced"
 fi
 
-if ! rg -q 'fn poll_once<F>.*should_cancel' "$ROOT/src/adapter.rs" \
-    || ! rg -q 'let scan_completed = Adapter::poll_once' "$ROOT/src/adapter.rs" \
-    || ! rg -q 'if !scan_completed' "$ROOT/src/adapter.rs"; then
-    echo "error: full scans are no longer cancellable during screen transitions" >&2
-    exit 1
-fi
+# ── Screen notification must stay a pure atomic transition marker ──
 
-WAKE_CANCEL_CHECKS="$(rg -c 'screen_wake_pending\.load\(Ordering::Acquire\)' "$ROOT/src/adapter.rs")"
-if [ "$WAKE_CANCEL_CHECKS" -lt 4 ]; then
-    echo "error: scan tail no longer yields before cache publication and charge control" >&2
-    exit 1
-fi
-
-if rg -n '/(sys|proc)/[^" ]*(oplus|oppo)|/proc/wireless' "$ROOT/src"; then
-    echo "error: OPlus-only kernel path found in source" >&2
-    exit 1
-fi
-
-SCREEN_BODY="$(sed -n '/pub fn notify_screen_status/,/^    }/p' "$ROOT/src/adapter.rs")"
+SCREEN_BODY="$(sed -n '/pub fn notify_screen_status/,/^    }/p' "$ADAPTER")"
 if printf '%s\n' "$SCREEN_BODY" | rg 'read_|write_|sleep|\.lock\(|request_refresh|thread::|setpriority|tracing::|try_send|wake_poll_worker'; then
-    echo "error: blocking or I/O work found in notify_screen_status" >&2
-    exit 1
+    fail "blocking or I/O work found in notify_screen_status"
 fi
 if ! printf '%s\n' "$SCREEN_BODY" | rg -q 'screen_on\.swap' \
     || ! printf '%s\n' "$SCREEN_BODY" | rg -q 'screen_wake_pending\.store'; then
-    echo "error: notify_screen_status is not a pure atomic transition marker" >&2
-    exit 1
+    fail "notify_screen_status is not a pure atomic transition marker"
 fi
 
-WAKE_BODY="$(sed -n '/fn wake_poll_worker/,/^    }/p' "$ROOT/src/adapter.rs")"
+WAKE_BODY="$(sed -n '/fn wake_poll_worker/,/^    }/p' "$ADAPTER")"
 if printf '%s\n' "$WAKE_BODY" | rg 'recv|sleep|\.lock\(|\.send\('; then
-    echo "error: blocking work found in wake_poll_worker" >&2
-    exit 1
+    fail "blocking work found in wake_poll_worker"
 fi
 if ! printf '%s\n' "$WAKE_BODY" | rg -q 'try_send'; then
-    echo "error: wake_poll_worker no longer uses try_send" >&2
-    exit 1
+    fail "wake_poll_worker no longer uses try_send"
 fi
 
-DECIMAL_BODY="$(sed -n '/pub fn get_decimal_soc/,/^    }/p' "$ROOT/src/adapter.rs")"
+DECIMAL_BODY="$(sed -n '/pub fn get_decimal_soc/,/^    }/p' "$ADAPTER")"
 if printf '%s\n' "$DECIMAL_BODY" | rg 'read_|write_|sleep|request_refresh|thread::'; then
-    echo "error: I/O or scheduling work found in get_decimal_soc" >&2
-    exit 1
+    fail "I/O or scheduling work found in get_decimal_soc"
+fi
+
+# ── Kernel paths ──
+
+if rg -n '/(sys|proc)/[^" ]*(oplus|oppo)|/proc/wireless' "$ROOT/src"; then
+    fail "OPlus-only kernel path found in source"
 fi
 
 if rg -n 'group .*wakelock|write /sys/power/wake' "$ROOT/charger-hal-service.rc"; then
-    echo "error: init service requests wake-lock access" >&2
-    exit 1
+    fail "init service requests wake-lock access"
 fi
+
+# ── Built binary ──
 
 if [ -f "$BIN" ]; then
     if strings -a "$BIN" | rg -i 'wake_lock|wake_unlock|alarmtimer|timerfd_create|autosuspend|suspend_blocker|/sys/power/wake'; then
-        echo "error: wake-capable API found in service binary" >&2
-        exit 1
+        fail "wake-capable API found in service binary"
     fi
     if strings -a "$BIN" | rg '/(sys|proc)/[^ ]*(oplus|oppo)|/proc/wireless'; then
-        echo "error: OPlus-only kernel path found in service binary" >&2
-        exit 1
+        fail "OPlus-only kernel path found in service binary"
     fi
 fi
 
-echo "PASS: metadata, screen path, kernel paths, and wake APIs are clean"
+echo "PASS: metadata, backend selection, screen path, kernel paths, and wake APIs are clean"

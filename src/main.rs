@@ -404,12 +404,10 @@ impl ICharger for ChargerBinderService {
     }
 
     fn getBattGaugeInfo(&self) -> BinderResult<String> {
-        let gauge_info = self.info().gauge_info;
-        if gauge_info.is_empty() {
-            Ok(self.adapter.soh_debug_info.lock().clone())
-        } else {
-            Ok(gauge_info)
-        }
+        // The OPlus HAL returns the raw gauge node contents, empty when the node
+        // is absent. It never substitutes a synthesised string, so neither do we
+        // (see chargehal-vendor-refs/FORMAT-CONTRACT.md §3).
+        Ok(self.info().gauge_info)
     }
 
     fn setChgConfig(&self, flag: i32, extra: &str, _callerName: i32) -> BinderResult<i32> {

@@ -1,8 +1,9 @@
 # OPlus Charger HAL Adapter
 
 Rust/NDK implementation of the native `ICharger` HAL for Xiaomi devices
-running ColorOS. It reads standard `power_supply` and Xiaomi `qcom-battery`
-sysfs nodes and exposes:
+running ColorOS. It bridges the Xiaomi vendor charging HAL when that HAL is
+reachable and falls back to reading standard `power_supply` and Xiaomi
+`qcom-battery` sysfs nodes when it is not, then exposes:
 
 ```text
 vendor.oplus.hardware.charger.ICharger/default
@@ -30,10 +31,39 @@ depends on the target kernel, ROM, SELinux policy, and available sysfs nodes.
 ## Features
 
 - Battery, USB, PD, charge-pump, and wireless charging state.
+- Vendor-HAL bridging first: data comes from `vendor.xiaomi.hardware.micharge`
+  when that HAL is reachable, with direct kernel-node reads as the fallback.
 - Background cache refreshed by power-supply uevents and timed polling.
 - Fast-charge classification with USB data-port protection.
 - Charge limit, bypass charging, and cooldown controls when supported by the device.
 - Compatibility stubs for unsupported ColorOS calls.
+
+## Charging backends
+
+Two backends implement the same `ChargeBackend` trait, and the adapter picks one
+at startup:
+
+1. **Xiaomi MiCharge HAL** ([`src/backend/micharge.rs`](src/backend/micharge.rs)) —
+   preferred. Talks to `vendor.xiaomi.hardware.micharge.IMiCharge/default` over
+   binder and moves the HAL's string results into the adapter snapshot. The
+   vendor HAL already absorbs the per-model kernel layout, which is why it wins:
+   node names, units and permissions differ between kernel generations.
+2. **Kernel nodes** ([`src/backend/sysfs.rs`](src/backend/sysfs.rs)) — fallback.
+   Reads `power_supply` and `qcom-battery` nodes directly. Always available, so a
+   device without the vendor HAL still reports sane charging data.
+
+The bridge does no unit conversion of its own for private nodes, because the
+vendor HAL does none either: only standard `power_supply` nodes carry an
+ABI-backed scale. Per-method evidence lives in
+`chargehal-vendor-refs/MICHARGE-MAPPING.md`.
+
+The HIDL generation of the vendor HAL is deliberately not bridged. On those
+devices the HAL reads the same `/sys/class/qcom-battery/*` and
+`/sys/class/power_supply/*` nodes that the fallback backend reads, so bridging
+would route identical data through an extra binder hop and buy architectural
+consistency only. The devices that actually need the bridge are the ones whose
+kernel moved to `/sys/class/xm_power/*`, and those are served by the AIDL
+bridge.
 
 ## Build
 
@@ -88,6 +118,14 @@ latency. Do not run it on a primary device.
 ## Limitations
 
 - This is a device-specific Xiaomi/ColorOS compatibility layer, not a generic Android HAL.
+- The bridge targets the AIDL V2 generation of the Xiaomi HAL. A device that only
+  ships the HIDL 1.0 generation falls back to the kernel-node reader.
+- Several `ICharger` methods are specified to return the raw contents of OPPO
+  private nodes (`/sys/class/oplus_chg/*`, `/proc/charger/*`, `/proc/wireless/*`).
+  Those nodes do not exist on Xiaomi kernels, so such calls return an empty
+  string. `queryChargeInfo` and `getPsyBatteryStatus` were rebuilt to the official
+  wire format; the remaining gaps are listed in
+  `chargehal-vendor-refs/FORMAT-CONTRACT.md` §7.
 - Charging node names, units, permissions, and control behavior vary by kernel.
 - Some OPlus methods are stubs because the target Xiaomi kernel lacks the corresponding hardware.
 - Authentication and short-circuit health values include target-specific compatibility behavior.

@@ -1,6 +1,7 @@
 // Xiaomi → ColorOS ICharger adapter. Reads standard + qcom-battery sysfs,
 // exposes vendor.oplus.hardware.charger.ICharger/default.
 
+use crate::backend::ChargeBackend;
 use parking_lot::Mutex;
 use std::fs;
 #[cfg(target_os = "android")]
@@ -24,15 +25,6 @@ fn try_read_int(path: &str) -> Option<i32> {
         .and_then(|s| s.trim().parse::<i64>().ok())
         .map(clamp_i64_to_i32)
 }
-fn read_int(path: &str) -> i32 {
-    try_read_int(path).unwrap_or(0)
-}
-fn read_string(path: &str) -> String {
-    fs::read_to_string(path)
-        .ok()
-        .map(|s| s.trim().to_string())
-        .unwrap_or_default()
-}
 fn path_exists(path: &str) -> bool {
     Path::new(path).exists()
 }
@@ -41,54 +33,6 @@ fn try_read_int_any(paths: &[&str]) -> Option<i32> {
 }
 fn read_int_any(paths: &[&str]) -> i32 {
     try_read_int_any(paths).unwrap_or(0)
-}
-fn update_int_from_paths(target: &mut i32, paths: &[&str]) {
-    if let Some(value) = try_read_int_any(paths) {
-        *target = value;
-    }
-}
-fn update_non_empty_string_from_paths(target: &mut String, paths: &[&str]) {
-    for path in paths {
-        if let Ok(value) = fs::read_to_string(path) {
-            let value = value.trim();
-            if !value.is_empty() {
-                target.clear();
-                target.push_str(value);
-                return;
-            }
-        }
-    }
-}
-fn read_positive_int_any(paths: &[&str]) -> i32 {
-    for p in paths {
-        let value = read_int(p);
-        if value > 0 {
-            return value;
-        }
-    }
-    0
-}
-fn read_string_any(paths: &[&str]) -> String {
-    for p in paths {
-        if let Ok(value) = fs::read_to_string(p) {
-            let value = value.trim();
-            if !value.is_empty() {
-                return value.to_string();
-            }
-        }
-    }
-    String::new()
-}
-fn read_non_empty_string_any(paths: &[&str]) -> String {
-    for p in paths {
-        if path_exists(p) {
-            let value = read_string(p);
-            if !value.is_empty() {
-                return value;
-            }
-        }
-    }
-    String::new()
 }
 fn write_string_any(paths: &[&str], value: &str) -> bool {
     let mut wrote = false;
@@ -102,9 +46,6 @@ fn write_string_any(paths: &[&str], value: &str) -> bool {
 fn clamp_i64_to_i32(value: i64) -> i32 {
     value.clamp(i32::MIN as i64, i32::MAX as i64) as i32
 }
-fn clamp_u64_to_i32(value: u64) -> i32 {
-    value.min(i32::MAX as u64) as i32
-}
 fn abs_i32_to_i64(value: i32) -> i64 {
     (value as i64).abs()
 }
@@ -116,10 +57,6 @@ fn normalize_capacity_mah(value: i32) -> i32 {
     } else {
         value
     }
-}
-fn normalize_battery_capacity(value: i32) -> i32 {
-    let percent = if value > 100 { value / 100 } else { value };
-    percent.clamp(0, 100)
 }
 fn parse_first_int(value: &str) -> Option<i32> {
     value
@@ -142,13 +79,6 @@ fn parse_plus_ints(value: &str) -> Vec<i32> {
         .split('+')
         .filter_map(|part| part.trim().parse::<i32>().ok())
         .collect()
-}
-fn restricted_charge_control_value(max_value: i32) -> String {
-    if max_value > 1 {
-        (max_value - 1).to_string()
-    } else {
-        CHARGE_CONTROL_LIMIT_RESTRICTED_FALLBACK.to_string()
-    }
 }
 
 fn is_data_port_usb_type(value: &str) -> bool {
@@ -234,123 +164,7 @@ fn monitor_power_supply_uevents(adapter: Weak<Adapter>) -> io::Result<()> {
 
 // ── sysfs paths ──
 
-const PSY_BATTERY: &str = "/sys/class/power_supply/battery";
-const PSY_USB: &str = "/sys/class/power_supply/usb";
-const PSY_AC: &str = "/sys/class/power_supply/ac";
-const PSY_WIRELESS: &str = "/sys/class/power_supply/wireless";
-const PSY_CP: &str = "/sys/class/power_supply/cp";
-const PSY_DC: &str = "/sys/class/power_supply/dc";
-const QCOM_BATT: &str = "/sys/class/qcom-battery";
-
-const PD_VERIFIED_PATHS: &[&str] = &[
-    "/sys/class/qcom-battery/pd_verifed",
-    "/sys/class/power_supply/usb/pd_authentication",
-    "/sys/class/subpmic-battery/pd_verifed",
-    "/sys/class/Charging_Adapter/pd_adapter/usbpd_verifed",
-];
-const QUICK_CHG_TYPE_PATHS: &[&str] = &[
-    "/sys/class/qcom-battery/quick_charge_type",
-    "/sys/class/power_supply/usb/quick_charge_type",
-    "/sys/class/power_supply/battery/quick_charge_type",
-];
-const QCOM_REAL_TYPE_PATHS: &[&str] = &[
-    "/sys/class/qcom-battery/real_type",
-    "/sys/class/power_supply/usb/real_type",
-    "/sys/class/qcom-battery/usb_real_type",
-];
-const PC_PORT_ONLINE_PATHS: &[&str] = &[
-    "/sys/class/power_supply/battery/pc_port_online",
-    "/sys/class/power_supply/usb/pc_port_online",
-    "/sys/class/qcom-battery/pc_port_online",
-];
-const USB_CURRENT_NOW_PATHS: &[&str] = &[
-    "/sys/class/power_supply/usb/current_now",
-    "/sys/class/power_supply/usb/input_current_now",
-];
-const USB_CONNECTOR_TEMP_PATHS: &[&str] = &[
-    "/sys/class/qcom-battery/connector_temp",
-    "/sys/class/power_supply/usb/usb_temp",
-];
-const CP_BUS_VOLTAGE_PATHS: &[&str] = &["/sys/class/qcom-battery/bq2597x_bus_voltage"];
-const CP_BUS_CURRENT_PATHS: &[&str] = &["/sys/class/qcom-battery/bq2597x_bus_current"];
-const CP_ONLINE_PATHS: &[&str] = &[
-    "/sys/class/power_supply/cp/online",
-    "/sys/class/qcom-battery/bq2597x_chip_ok",
-    "/sys/class/qcom-battery/master_smb1396_online",
-    "/sys/class/qcom-battery/slave_smb1396_online",
-];
-const FG_FCC_PATHS: &[&str] = &[
-    "/sys/class/power_supply/battery/batt_fcc",
-    "/sys/class/qcom-battery/fg1_fcc",
-    "/sys/class/power_supply/battery/charge_full",
-];
-const CHARGE_FULL_DESIGN_PATHS: &[&str] = &[
-    "/sys/class/power_supply/battery/charge_full_design",
-    "/sys/class/qcom-battery/fg1_design_capacity",
-    "/sys/class/qcom-battery/fg2_design_capacity",
-];
-const FG_RM_PATHS: &[&str] = &[
-    "/sys/class/power_supply/battery/batt_rm",
-    "/sys/class/qcom-battery/fg1_rm",
-    "/sys/class/power_supply/battery/charge_counter",
-];
-const CHARGE_COUNTER_PATHS: &[&str] = &["/sys/class/power_supply/battery/charge_counter"];
-const FG_RSOC: &str = "/sys/class/qcom-battery/fg1_rsoc";
-const BATTERY_CAPACITY_PATHS: &[&str] = &["/sys/class/power_supply/battery/capacity", FG_RSOC];
-const FG_CYCLE_PATHS: &[&str] = &[
-    "/sys/class/qcom-battery/fg1_cycle",
-    "/sys/class/power_supply/battery/cycle_count",
-];
-const FG_SOH_PATHS: &[&str] = &[
-    "/sys/class/qcom-battery/fg1_soh",
-    "/sys/class/qcom-battery/soh",
-    "/sys/class/power_supply/bms/soh",
-];
-const FG_QMAX_PATHS: &[&str] = &[
-    "/sys/class/qcom-battery/fg1_qmax",
-    "/sys/class/power_supply/battery/qmax",
-];
-const BATTERY_TYPE_PATHS: &[&str] = &[
-    "/sys/class/power_supply/battery/battery_type",
-    "/sys/class/power_supply/battery/technology",
-];
-const INPUT_CURRENT_MAX_PATHS: &[&str] = &[
-    "/sys/class/qcom-battery/fg1_current_max",
-    "/sys/class/qcom-battery/constant_power",
-    "/sys/class/qcom-battery/restrict_cur",
-    "/sys/class/power_supply/usb_main/constant_charge_current_max",
-    "/sys/class/power_supply/usb/current_max",
-    "/sys/class/power_supply/usb_main/input_current_max",
-];
-const ADAPTER_POWER_PATHS: &[&str] = &[
-    "/sys/class/qcom-battery/apdo_max",
-    "/sys/class/qcom-battery/power_max",
-    "/sys/class/power_supply/usb/apdo_max",
-    "/sys/class/power_supply/usb/power_max",
-    "/sys/class/qcom-battery/referance_power",
-];
-const REMAINING_TIME_PATHS: &[&str] = &[
-    "/sys/class/qcom-battery/remaining_time",
-    "/sys/class/power_supply/battery/time_to_full_now",
-];
-const FASTCHG_MODE_PATHS: &[&str] = &[
-    "/sys/class/qcom-battery/fastchg_mode",
-    "/sys/class/power_supply/bms/fastcharge_mode",
-];
 const SHORT_CIRCUIT_HEALTHY: i32 = 1;
-const CHARGE_CONTROL_LIMIT_PATHS: &[&str] = &[
-    "/sys/class/power_supply/battery/charge_control_limit",
-    "/sys/class/qcom-battery/charge_control_limit",
-];
-const CHARGE_CONTROL_LIMIT_MAX_PATHS: &[&str] = &[
-    "/sys/class/power_supply/battery/charge_control_limit_max",
-    "/sys/class/qcom-battery/charge_control_limit_max",
-];
-const COOL_MODE_PATHS: &[&str] = &[
-    "/sys/class/power_supply/main/cool_mode",
-    "/sys/class/qcom-battery/cool_mode",
-];
-const COOL_DOWN_PATHS: &[&str] = &["/sys/class/power_supply/battery/cool_down"];
 const CHARGE_STOP_THRESHOLD_PATHS: &[&str] = &[
     "/sys/class/power_supply/battery/charge_limit",
     "/sys/class/qcom-battery/charge_limit",
@@ -363,10 +177,6 @@ const CHARGE_LIMIT_STATE_PATHS: &[&str] = &[
     "/sys/class/power_supply/battery/night_charging",
     "/sys/class/qcom-battery/night_charging",
 ];
-const INPUT_SUSPEND_PATHS: &[&str] = &[
-    "/sys/class/power_supply/battery/input_suspend",
-    "/sys/class/qcom-battery/input_suspend",
-];
 const BYPASS_STATUS_PATHS: &[&str] = &[
     "/sys/class/power_supply/battery/bypass_charging",
     "/sys/class/qcom-battery/bypass_charging",
@@ -375,12 +185,7 @@ const BYPASS_STATUS_PATHS: &[&str] = &[
     "/sys/class/power_supply/battery/charge_bypass",
     "/sys/class/qcom-battery/charge_bypass",
 ];
-const CHARGE_CONTROL_LIMIT_RESTRICTED_FALLBACK: i32 = 15;
-const CHARGE_CONTROL_LIMIT_RELEASED: &str = "0";
 const CHARGE_LIMIT_HYSTERESIS_PERCENT: i32 = 1;
-const POWER_RECHECK_MIN_W: i32 = 30;
-const POWER_RECHECK_MAX_W: i32 = 35;
-const POWER_RECHECK_DELAY_MS: u64 = 10;
 const SCREEN_ON_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const SCREEN_OFF_CHARGING_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const SCREEN_OFF_IDLE_POLL_INTERVAL: Duration = Duration::from_secs(30);
@@ -394,27 +199,6 @@ const SYNTHETIC_DECIMAL_STEP_CENTI: i32 = 1;
 const SYNTHETIC_DECIMAL_MAX_STEP_CENTI: i32 = 3;
 
 // Individual qcom-battery nodes
-const CP_MASTER_IIN: &str = "/sys/class/qcom-battery/master_smb1396_iin";
-const CP_SLAVE_IIN: &str = "/sys/class/qcom-battery/slave_smb1396_iin";
-const TYPEC_MODE: &str = "/sys/class/qcom-battery/typec_mode";
-const CC_ORIENTATION: &str = "/sys/class/qcom-battery/cc_orientation";
-const CURRENT_STATE: &str = "/sys/class/qcom-battery/current_state";
-const SPORT_MODE: &str = "/sys/class/qcom-battery/sport_mode";
-const WIRELESS_TYPE: &str = "/sys/class/qcom-battery/wireless_type";
-const SMART_CHG: &str = "/sys/class/qcom-battery/smart_chg";
-const NIGHT_CHARGING: &str = "/sys/class/qcom-battery/night_charging";
-const SMART_BATT: &str = "/sys/class/qcom-battery/smart_batt";
-const RESTRICT_CHG: &str = "/sys/class/qcom-battery/restrict_chg";
-const BATT_SN_PATHS: &[&str] = &[
-    "/sys/class/power_supply/battery/battery_sn",
-    "/sys/class/qcom-battery/batt_sn",
-    "/sys/class/power_supply/bms/serial_number",
-    "/sys/class/power_supply/battery/serial_number",
-];
-const BATT_CONT_ONLINE: &str = "/sys/class/qcom-battery/battcont_online";
-const FG_AI: &str = "/sys/class/qcom-battery/fg1_ai";
-const FG_AVG_CURRENT: &str = "/sys/class/qcom-battery/fg1_avg_current";
-const FG_VENDOR: &str = "/sys/class/qcom-battery/fg_vendor";
 const UI_SOC_DECIMAL_PATHS: &[&str] = &[
     "/proc/ui_soc_decimal",
     "/sys/class/power_supply/bms/soc_decimal",
@@ -424,24 +208,6 @@ const UI_SOC_DECIMAL_RATE_PATHS: &[&str] = &[
     "/sys/class/power_supply/bms/soc_decimal_rate",
     "/sys/class/qcom-battery/soc_decimal_rate",
 ];
-const FG_CELL1_VOL: &str = "/sys/class/qcom-battery/fg1_cell1_vol";
-const FG_CELL2_VOL: &str = "/sys/class/qcom-battery/fg1_cell2_vol";
-const FG_CELL1_RASCALE: &str = "/sys/class/qcom-battery/fg1_cell1_rascale";
-const MAX_LIFE_TEMP: &str = "/sys/class/qcom-battery/max_life_temp";
-const MAX_LIFE_VOL: &str = "/sys/class/qcom-battery/max_life_vol";
-const OVER_VOL_DURATION: &str = "/sys/class/qcom-battery/over_vol_duration";
-const MOISTURE_STATUS: &str = "/sys/class/qcom-battery/moisture_detection_status";
-const THERMAL_BOARD_TEMP: &str = "/sys/class/qcom-battery/thermal_board_temp";
-const DIE_TEMPERATURE: &str = "/sys/class/qcom-battery/die_temperature";
-const SLAVE_DIE_TEMPERATURE: &str = "/sys/class/qcom-battery/slave_die_temperature";
-const FLASH_ACTIVE: &str = "/sys/class/qcom-battery/flash_active";
-const HIFI_CONNECT: &str = "/sys/class/qcom-battery/hifi_connect";
-const VBUS_DISABLE: &str = "/sys/class/qcom-battery/vbus_disable";
-const OTG_UI_SUPPORT: &str = "/sys/class/qcom-battery/otg_ui_support";
-const FAKE_SOC: &str = "/sys/class/qcom-battery/fake_soc";
-const FAKE_SOH: &str = "/sys/class/qcom-battery/fake_soh";
-const FAKE_CYCLE: &str = "/sys/class/qcom-battery/fake_cycle";
-const FAKE_TEMP: &str = "/sys/class/qcom-battery/fake_temp";
 
 // ── State machine ──
 
@@ -557,19 +323,6 @@ impl Default for DecimalSocState {
             random: 0,
         }
     }
-}
-
-struct FastChargeInputs<'a> {
-    quick_charge_type: &'a str,
-    fastchg_mode: i32,
-    sport_mode: i32,
-    pd_verified: i32,
-    cp_online: i32,
-    usb_type: &'a str,
-    adapter_power_w: i32,
-    online: bool,
-    usb_online: i32,
-    pc_port_online: i32,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -761,6 +514,11 @@ pub struct Adapter {
     pub anti_expansion_dis: Mutex<String>, // NO-OP
 
     pub battery_log_enabled: AtomicBool, // NO-OP: no battery log push on Xiaomi
+
+    /// Where snapshots come from. The Xiaomi vendor HAL is preferred because it
+    /// absorbs the per-model sysfs layout; the kernel-node reader is the
+    /// fallback when that HAL is absent.
+    backend: Arc<dyn ChargeBackend>,
 }
 
 impl Adapter {
@@ -808,6 +566,7 @@ impl Adapter {
             anti_expansion_dis: Mutex::new("0".into()),
             info: Mutex::new(info),
             battery_log_enabled: AtomicBool::new(false),
+            backend: crate::backend::select(),
         });
 
         let adapter_weak = Arc::downgrade(&adapter);
@@ -856,14 +615,12 @@ impl Adapter {
                     if !refresh_requested
                         && !maintenance_due
                         && (timed_out || uevent_probe_requested)
+                        && !adapter_clone.backend.power_source_changed()
                     {
-                        let snapshot = adapter_clone.fast_charge_snapshot.lock().clone();
-                        if !Self::power_source_probe_changed(&snapshot) {
-                            continue;
-                        }
+                        continue;
                     }
                     let mut next_info = adapter_clone.info.lock().clone();
-                    let scan_completed = Adapter::poll_once(&mut next_info, || {
+                    let scan_completed = adapter_clone.backend.refresh(&mut next_info, &|| {
                         adapter_clone.screen_wake_pending.load(Ordering::Acquire)
                     });
                     if !scan_completed || adapter_clone.screen_wake_pending.load(Ordering::Acquire)
@@ -945,490 +702,7 @@ impl Adapter {
         adapter
     }
 
-    fn poll_once<F>(info: &mut ChargerInfo, should_cancel: F) -> bool
-    where
-        F: Fn() -> bool,
-    {
-        if should_cancel() {
-            return false;
-        }
-        let b = PSY_BATTERY;
-        update_int_from_paths(&mut info.usb_online, &[&format!("{}/online", PSY_USB)]);
-        update_non_empty_string_from_paths(&mut info.usb_type, &[&format!("{}/type", PSY_USB)]);
-        update_int_from_paths(&mut info.ac_online, &[&format!("{}/online", PSY_AC)]);
-        update_int_from_paths(
-            &mut info.wireless_online,
-            &[
-                &format!("{}/online", PSY_WIRELESS),
-                &format!("{}/online", PSY_DC),
-            ],
-        );
-        update_non_empty_string_from_paths(&mut info.wireless_type, &[WIRELESS_TYPE]);
-        if should_cancel() {
-            return false;
-        }
-
-        update_int_from_paths(
-            &mut info.usb_voltage_now,
-            &[&format!("{}/voltage_now", PSY_USB)],
-        );
-        update_int_from_paths(&mut info.cp_bus_voltage, CP_BUS_VOLTAGE_PATHS);
-        update_int_from_paths(&mut info.cp_bus_current, CP_BUS_CURRENT_PATHS);
-        if info.usb_voltage_now == 0 {
-            info.usb_voltage_now = info.cp_bus_voltage;
-        }
-        update_int_from_paths(&mut info.usb_current_now, USB_CURRENT_NOW_PATHS);
-        if info.usb_current_now == 0 {
-            info.usb_current_now = info.cp_bus_current;
-        }
-
-        update_int_from_paths(&mut info.usb_temp, USB_CONNECTOR_TEMP_PATHS);
-        update_int_from_paths(&mut info.connector_temp, USB_CONNECTOR_TEMP_PATHS);
-        info.usb_real_type = read_string_any(QCOM_REAL_TYPE_PATHS);
-        if !info.usb_real_type.is_empty() {
-            info.usb_type = info.usb_real_type.clone();
-        }
-        update_non_empty_string_from_paths(&mut info.typec_mode, &[TYPEC_MODE]);
-        update_int_from_paths(&mut info.cc_orientation, &[CC_ORIENTATION]);
-        if should_cancel() {
-            return false;
-        }
-
-        update_non_empty_string_from_paths(&mut info.battery_status, &[&format!("{}/status", b)]);
-        update_non_empty_string_from_paths(&mut info.battery_health, &[&format!("{}/health", b)]);
-        update_int_from_paths(&mut info.battery_temp, &[&format!("{}/temp", b)]);
-        update_int_from_paths(
-            &mut info.battery_current_now,
-            &[&format!("{}/current_now", b)],
-        );
-        update_int_from_paths(
-            &mut info.battery_voltage_now,
-            &[&format!("{}/voltage_now", b)],
-        );
-        update_non_empty_string_from_paths(
-            &mut info.battery_charge_type,
-            &[&format!("{}/charge_type", b)],
-        );
-        update_non_empty_string_from_paths(
-            &mut info.battery_technology,
-            &[&format!("{}/technology", b)],
-        );
-        if let Some(capacity) = try_read_int_any(BATTERY_CAPACITY_PATHS) {
-            info.battery_capacity = normalize_battery_capacity(capacity);
-        }
-        if should_cancel() {
-            return false;
-        }
-
-        info.fg_fcc = read_int(FG_FCC_PATHS[0]);
-        info.charge_full = read_int_any(FG_FCC_PATHS);
-        info.fg_rm = read_int(FG_RM_PATHS[0]);
-        info.fg_rsoc = read_int(FG_RSOC);
-        info.fg_cycle = read_int(FG_CYCLE_PATHS[0]);
-        info.fg_soh = read_int_any(FG_SOH_PATHS);
-        info.fg_qmax = read_int_any(FG_QMAX_PATHS);
-        info.fg_ai = read_int(FG_AI);
-        info.fg_avg_current = read_int(FG_AVG_CURRENT);
-        info.fg_vendor = read_string(FG_VENDOR);
-        info.battery_type = read_non_empty_string_any(BATTERY_TYPE_PATHS);
-        info.gauge_type = info.fg_vendor.clone();
-        info.gauge_info.clear();
-        info.charge_full_design = read_int_any(CHARGE_FULL_DESIGN_PATHS);
-        if info.charge_full_design == 0 {
-            info.charge_full_design = info.charge_full;
-        }
-        info.charge_counter = read_int_any(CHARGE_COUNTER_PATHS);
-        if info.charge_counter == 0 {
-            info.charge_counter = info.fg_rm;
-        }
-        info.cycle_count = read_int_any(FG_CYCLE_PATHS);
-        if should_cancel() {
-            return false;
-        }
-
-        info.cell1_vol = read_int(FG_CELL1_VOL);
-        info.cell2_vol = read_int(FG_CELL2_VOL);
-        info.cell1_rascale = read_int(FG_CELL1_RASCALE);
-
-        info.input_current_max = read_int_any(INPUT_CURRENT_MAX_PATHS);
-        info.input_voltage_max = read_int(&format!("{}/voltage_max", PSY_USB));
-        info.fastchg_mode = read_int_any(FASTCHG_MODE_PATHS);
-        info.current_state = read_string(CURRENT_STATE);
-        info.sport_mode = read_int(SPORT_MODE);
-        info.quick_charge_type = read_string_any(QUICK_CHG_TYPE_PATHS);
-        info.pd_verified = read_int_any(PD_VERIFIED_PATHS);
-        if should_cancel() {
-            return false;
-        }
-
-        info.cp_online = read_int_any(CP_ONLINE_PATHS);
-        info.cp_status = read_string(&format!("{}/status", PSY_CP));
-        info.cp_master_iin = read_int(CP_MASTER_IIN);
-        info.cp_slave_iin = read_int(CP_SLAVE_IIN);
-
-        info.remaining_time = read_int_any(REMAINING_TIME_PATHS);
-        info.restrict_chg = read_int(RESTRICT_CHG);
-        info.input_suspend = read_int_any(INPUT_SUSPEND_PATHS);
-        info.smart_chg = read_int(SMART_CHG);
-        info.night_charging = read_int(NIGHT_CHARGING);
-        info.smart_batt = read_int(SMART_BATT);
-        if should_cancel() {
-            return false;
-        }
-
-        info.die_temperature = read_int(DIE_TEMPERATURE);
-        info.slave_die_temperature = read_int(SLAVE_DIE_TEMPERATURE);
-        info.thermal_board_temp = read_int(THERMAL_BOARD_TEMP);
-
-        info.batt_sn = read_string_any(BATT_SN_PATHS);
-        info.authentic = 1;
-        info.batt_cont_online = read_int(BATT_CONT_ONLINE);
-        info.max_life_temp = read_int(MAX_LIFE_TEMP);
-        info.max_life_vol = read_int(MAX_LIFE_VOL);
-        info.over_vol_duration = read_int(OVER_VOL_DURATION);
-        info.moisture_detected = read_int(MOISTURE_STATUS) != 0;
-        if should_cancel() {
-            return false;
-        }
-
-        info.flash_active = read_int(FLASH_ACTIVE) != 0;
-        info.hifi_connect = read_int(HIFI_CONNECT) != 0;
-        info.vbus_disable = read_int(VBUS_DISABLE) != 0;
-        info.otg_ui_support = read_int(OTG_UI_SUPPORT);
-
-        info.fake_soc = read_int(FAKE_SOC);
-        info.fake_soh = read_int(FAKE_SOH);
-        info.fake_cycle = read_int(FAKE_CYCLE);
-        info.fake_temp = read_int(FAKE_TEMP);
-
-        info.pc_port_online = read_int_any(PC_PORT_ONLINE_PATHS);
-        if should_cancel() {
-            return false;
-        }
-
-        let charger_online =
-            info.usb_online != 0 || info.ac_online != 0 || info.wireless_online != 0;
-        let data_port = info.usb_online != 0
-            && (info.pc_port_online != 0
-                || is_data_port_usb_type(&info.usb_real_type)
-                || (info.usb_real_type.is_empty() && is_data_port_usb_type(&info.usb_type)));
-        if !charger_online {
-            Self::clear_fast_charge_session(info);
-        } else if data_port {
-            info.quick_charge_type = "0".into();
-            info.pd_verified = 0;
-            info.cp_online = 0;
-            info.cp_status.clear();
-            info.cp_master_iin = 0;
-            info.cp_slave_iin = 0;
-            info.fastchg_mode = 0;
-            info.sport_mode = 0;
-            info.adapter_power_w = 0;
-        } else {
-            let adapter_power_w = Adapter::estimate_power(info);
-            if should_cancel() {
-                return false;
-            }
-            info.adapter_power_w = Adapter::stable_adapter_power_w_with(
-                adapter_power_w,
-                &info.quick_charge_type,
-                Adapter::current_quick_charge_type,
-                Adapter::read_adapter_power_direct_w,
-                || thread::sleep(Duration::from_millis(POWER_RECHECK_DELAY_MS)),
-            );
-            if should_cancel() {
-                return false;
-            }
-        }
-        info.fast_charge_type = Adapter::classify_fast_charge(info);
-        info.charge_technology = Adapter::classify_charge_technology(info);
-        info.charge_state = Adapter::classify_charge_state(info);
-        info.remaining_time = Adapter::estimate_remaining_time_seconds(info);
-        true
-    }
-
-    fn clear_fast_charge_session(info: &mut ChargerInfo) {
-        info.usb_type.clear();
-        info.usb_real_type.clear();
-        info.quick_charge_type.clear();
-        info.pd_verified = 0;
-        info.cp_online = 0;
-        info.cp_status.clear();
-        info.cp_bus_voltage = 0;
-        info.cp_bus_current = 0;
-        info.cp_master_iin = 0;
-        info.cp_slave_iin = 0;
-        info.fastchg_mode = 0;
-        info.sport_mode = 0;
-        info.adapter_power_w = 0;
-        info.fast_charge_type = "0".into();
-        info.charge_technology = "0".into();
-    }
-
     // ── Classifiers ──
-
-    /// Xiaomi quick_charge_type → OPlus fast_charge_type (0-3)
-    fn classify_fast_charge_values(inputs: FastChargeInputs<'_>) -> i32 {
-        let FastChargeInputs {
-            quick_charge_type,
-            fastchg_mode,
-            sport_mode,
-            pd_verified,
-            cp_online,
-            usb_type,
-            adapter_power_w,
-            online,
-            usb_online,
-            pc_port_online,
-        } = inputs;
-        if !online {
-            return 0;
-        }
-        if usb_online != 0 && (pc_port_online != 0 || is_data_port_usb_type(usb_type)) {
-            return 0;
-        }
-        let qct_num: i32 = quick_charge_type.trim().parse().unwrap_or(-1);
-        match qct_num {
-            1 => return 1,
-            2 => return 2,
-            3 | 4 => return 3,
-            _ => {}
-        }
-        let qct = quick_charge_type;
-        if qct.contains("Super")
-            || qct.contains("SUPER")
-            || qct.contains("Turbo")
-            || qct.contains("TURBO")
-        {
-            return 3;
-        }
-        if qct.contains("Flash") || qct.contains("FLASH") {
-            return 2;
-        }
-        if qct.contains("Fast") || qct.contains("FAST") {
-            return 1;
-        }
-        if qct.contains("Normal") || qct.contains("NORMAL") {
-            return 0;
-        }
-        if fastchg_mode != 0 || sport_mode != 0 || pd_verified != 0 || cp_online != 0 {
-            return 3;
-        }
-        let usb_type = usb_type.to_lowercase();
-        if usb_type.contains("pd") || usb_type.contains("pps") {
-            return 3;
-        }
-        if usb_type.contains("qc") || usb_type.contains("hvdcp") || usb_type.contains("quick") {
-            return 2;
-        }
-        if usb_type.contains("dcp") {
-            return 1;
-        }
-        if usb_type.contains("sdp") || usb_type.contains("cdp") {
-            return 0;
-        }
-        if adapter_power_w > 20 {
-            3
-        } else if adapter_power_w > 10 {
-            2
-        } else if adapter_power_w > 3 || online {
-            1
-        } else {
-            0
-        }
-    }
-
-    fn classify_fast_charge(info: &ChargerInfo) -> String {
-        let ut = if !info.usb_real_type.is_empty() {
-            &info.usb_real_type
-        } else {
-            &info.usb_type
-        };
-        Self::classify_fast_charge_values(FastChargeInputs {
-            quick_charge_type: &info.quick_charge_type,
-            fastchg_mode: info.fastchg_mode,
-            sport_mode: info.sport_mode,
-            pd_verified: info.pd_verified,
-            cp_online: info.cp_online,
-            usb_type: ut,
-            adapter_power_w: info.adapter_power_w,
-            online: info.usb_online != 0 || info.ac_online != 0 || info.wireless_online != 0,
-            usb_online: info.usb_online,
-            pc_port_online: info.pc_port_online,
-        })
-        .to_string()
-    }
-
-    /// Xiaomi quick_charge_type → OPlus charge_technology (0=normal,1=QC,2=HVDCP,3=PD_PPS)
-    fn classify_charge_technology_values(quick_charge_type: &str, fast_type: i32) -> i32 {
-        let qct_num: i32 = quick_charge_type.trim().parse().unwrap_or(-1);
-        match qct_num {
-            1 => return 1,
-            2 => return 2,
-            3 | 4 => return 3,
-            _ => {}
-        }
-        if quick_charge_type.contains("Super")
-            || quick_charge_type.contains("SUPER")
-            || quick_charge_type.contains("Turbo")
-            || quick_charge_type.contains("TURBO")
-        {
-            return 3;
-        }
-        if quick_charge_type.contains("Flash") || quick_charge_type.contains("FLASH") {
-            return 2;
-        }
-        if quick_charge_type.contains("Fast") || quick_charge_type.contains("FAST") {
-            return 1;
-        }
-        fast_type
-    }
-
-    fn classify_charge_technology(info: &ChargerInfo) -> String {
-        Self::classify_charge_technology_values(
-            &info.quick_charge_type,
-            info.fast_charge_type.trim().parse().unwrap_or(0),
-        )
-        .to_string()
-    }
-
-    fn classify_charge_state(info: &ChargerInfo) -> ChargeState {
-        if info.usb_online == 0 && info.ac_online == 0 && info.wireless_online == 0 {
-            return ChargeState::Disconnected;
-        }
-        let pw = info.adapter_power_w;
-        if pw > 30 {
-            ChargeState::SuperCharging
-        } else if pw > 20 {
-            ChargeState::FlashCharging
-        } else if pw > 10 {
-            ChargeState::FastCharging
-        } else if pw > 3 {
-            ChargeState::NormalCharging
-        } else {
-            ChargeState::SlowCharging
-        }
-    }
-
-    fn estimate_remaining_time_seconds(info: &ChargerInfo) -> i32 {
-        if info.remaining_time > 0 {
-            return if info.remaining_time > 86_400 {
-                info.remaining_time / 1000
-            } else {
-                info.remaining_time
-            };
-        }
-        if info.battery_status.eq_ignore_ascii_case("Full") || info.battery_capacity >= 100 {
-            return 0;
-        }
-        if info.usb_online == 0 && info.ac_online == 0 && info.wireless_online == 0 {
-            return 0;
-        }
-
-        let remaining_mah = if info.fg_fcc > 0 && info.fg_rm > 0 && info.fg_fcc > info.fg_rm {
-            normalize_capacity_mah(info.fg_fcc - info.fg_rm)
-        } else {
-            let fcc_mah = Self::best_fcc_mah(info);
-            if fcc_mah <= 0 {
-                return 0;
-            }
-            clamp_i64_to_i32((fcc_mah as i64) * ((100 - info.battery_capacity).max(0) as i64) / 100)
-        };
-        if remaining_mah <= 0 {
-            return 0;
-        }
-
-        let current_abs = abs_i32_to_i64(info.battery_current_now);
-        let current_ma = if current_abs > 100_000 {
-            current_abs / 1000
-        } else {
-            current_abs
-        };
-        if current_ma <= 0 {
-            return 0;
-        }
-        clamp_i64_to_i32((remaining_mah as i64) * 3600 / current_ma)
-    }
-
-    /// Power in watts. Auto-detects W / mW / µW units.
-    fn estimate_power(info: &ChargerInfo) -> i32 {
-        let direct_pw = read_positive_int_any(ADAPTER_POWER_PATHS);
-        if direct_pw > 0 {
-            return Self::normalize_power_value(direct_pw);
-        }
-        let const_pw = read_int(&format!("{}/constant_power", QCOM_BATT));
-        if const_pw > 0 {
-            return Self::normalize_power_value(const_pw);
-        }
-        if info.cp_bus_voltage > 0 && info.cp_bus_current > 0 {
-            return Self::power_watts(info.cp_bus_voltage, info.cp_bus_current);
-        }
-        if info.cp_master_iin > 0 || info.cp_slave_iin > 0 {
-            let v = if info.usb_voltage_now > 0 {
-                info.usb_voltage_now
-            } else {
-                info.battery_voltage_now
-            };
-            let total_i = info.cp_master_iin.saturating_add(info.cp_slave_iin);
-            if v > 0 && total_i > 0 {
-                return Self::power_watts(v, total_i);
-            }
-        }
-        let v = if info.usb_voltage_now > 0 {
-            info.usb_voltage_now
-        } else {
-            info.battery_voltage_now
-        };
-        let c = if info.input_current_max > 0 {
-            info.input_current_max
-        } else if info.usb_current_now > 0 {
-            info.usb_current_now
-        } else {
-            clamp_i64_to_i32(abs_i32_to_i64(info.battery_current_now))
-        };
-        Self::power_watts(v, c)
-    }
-
-    fn power_watts(voltage: i32, current: i32) -> i32 {
-        if voltage <= 0 || current <= 0 {
-            return 0;
-        }
-        let voltage = voltage as u64;
-        let current = current as u64;
-        let divisor = match (voltage > 100_000, current > 100_000) {
-            (true, true) => 1_000_000_000_000,
-            (true, false) | (false, true) => 1_000_000_000,
-            (false, false) => 1_000,
-        };
-        clamp_u64_to_i32(voltage.saturating_mul(current) / divisor)
-    }
-
-    fn normalize_power_value(power: i32) -> i32 {
-        if power > 100_000 {
-            power / 1_000_000
-        } else if power > 500 {
-            power / 1_000
-        } else {
-            power
-        }
-    }
-
-    fn read_adapter_power_direct_w() -> i32 {
-        let direct_pw = read_positive_int_any(ADAPTER_POWER_PATHS);
-        if direct_pw > 0 {
-            Self::normalize_power_value(direct_pw)
-        } else {
-            0
-        }
-    }
-
-    fn current_quick_charge_type() -> String {
-        read_string_any(QUICK_CHG_TYPE_PATHS)
-    }
-
-    fn is_quick_charge_type_4(value: &str) -> bool {
-        value.trim() == "4" || value.to_ascii_lowercase().contains("super")
-    }
 
     fn fast_charge_snapshot_from_info(info: &ChargerInfo) -> FastChargeSnapshot {
         let usb_type = if !info.usb_real_type.is_empty() {
@@ -1643,41 +917,6 @@ impl Adapter {
         Self::synthetic_decimal_soc_pair(&mut state, capacity, cached_seed, cached_rate)
     }
 
-    fn should_recheck_power(power_w: i32) -> bool {
-        (POWER_RECHECK_MIN_W..=POWER_RECHECK_MAX_W).contains(&power_w)
-    }
-
-    fn stable_adapter_power_w_with<F, G, H>(
-        current_power_w: i32,
-        quick_charge_type: &str,
-        mut read_quick_charge_type: F,
-        mut read_power_w: G,
-        mut wait: H,
-    ) -> i32
-    where
-        F: FnMut() -> String,
-        G: FnMut() -> i32,
-        H: FnMut(),
-    {
-        if !Self::should_recheck_power(current_power_w) {
-            return current_power_w;
-        }
-        let quick_charge_type = if quick_charge_type.trim().is_empty() {
-            read_quick_charge_type()
-        } else {
-            quick_charge_type.to_string()
-        };
-        if !Self::is_quick_charge_type_4(&quick_charge_type) {
-            return current_power_w;
-        }
-        let mut best_power_w = current_power_w;
-        for _ in 0..3 {
-            wait();
-            best_power_w = best_power_w.max(read_power_w());
-        }
-        best_power_w
-    }
-
     pub fn get_stable_adapter_power_w(&self) -> i32 {
         let snapshot = self.get_fast_charge_snapshot();
         if !snapshot.online {
@@ -1698,41 +937,6 @@ impl Adapter {
         } else {
             SCREEN_OFF_IDLE_POLL_INTERVAL
         }
-    }
-
-    fn power_source_probe_values_changed(
-        snapshot: &FastChargeSnapshot,
-        usb_online: Option<i32>,
-        ac_online: Option<i32>,
-        wireless_online: Option<i32>,
-        pc_port_online: Option<i32>,
-        quick_charge_type: Option<&str>,
-        usb_type: Option<&str>,
-    ) -> bool {
-        usb_online.is_some_and(|value| value != snapshot.usb_online)
-            || ac_online.is_some_and(|value| value != snapshot.ac_online)
-            || wireless_online.is_some_and(|value| value != snapshot.wireless_online)
-            || pc_port_online.is_some_and(|value| value != snapshot.pc_port_online)
-            || quick_charge_type.is_some_and(|value| value != snapshot.quick_charge_type)
-            || usb_type.is_some_and(|value| value != snapshot.usb_type)
-    }
-
-    fn power_source_probe_changed(snapshot: &FastChargeSnapshot) -> bool {
-        let usb_online_path = format!("{}/online", PSY_USB);
-        let ac_online_path = format!("{}/online", PSY_AC);
-        let wireless_online_path = format!("{}/online", PSY_WIRELESS);
-        let dc_online_path = format!("{}/online", PSY_DC);
-        let quick_charge_type = read_string_any(QUICK_CHG_TYPE_PATHS);
-        let usb_type = read_string_any(QCOM_REAL_TYPE_PATHS);
-        Self::power_source_probe_values_changed(
-            snapshot,
-            try_read_int(&usb_online_path),
-            try_read_int(&ac_online_path),
-            try_read_int_any(&[&wireless_online_path, &dc_online_path]),
-            try_read_int_any(PC_PORT_ONLINE_PATHS),
-            (!quick_charge_type.is_empty()).then_some(quick_charge_type.as_str()),
-            (!usb_type.is_empty()).then_some(usb_type.as_str()),
-        )
     }
 
     fn request_refresh(&self) {
@@ -1831,35 +1035,125 @@ impl Adapter {
 
     // ── String builders (ColorOS format) ──
 
+    /// `queryChargeInfo` payload.
+    ///
+    /// The OPlus HAL returns a newline-separated `key=value` list and the
+    /// ColorOS client parses it by key name, so both the names and their order
+    /// are a hard contract. Values with no source on this platform report `0` or
+    /// an empty string instead of being omitted, because the client looks keys
+    /// up by name.
+    ///
+    /// Key list and order come from the official V11 service; see
+    /// `chargehal-vendor-refs/FORMAT-CONTRACT.md` §3.1.
     fn build_charger_info_json(info: &ChargerInfo) -> String {
-        let temp_c = info.battery_temp as f64 / 10.0;
-        let voltage_v = info.battery_voltage_now as f64 / 1_000_000.0;
-        let current_ma = info.battery_current_now as f64 / 1000.0;
         let soh = Self::best_soh(info);
-        let fcc_mah = Self::best_fcc_mah(info);
-        let rm_mah = Self::best_rm_mah(info);
-        let design_mah = Self::best_design_capacity_mah(info);
-        let qmax_mah = Self::best_qmax_mah(info);
+        let charge_counter = Self::best_charge_counter_mah(info);
         let battery_type = Self::best_battery_type(info);
+        let fast_type = info.fast_charge_type.trim().parse::<i32>().unwrap_or(0);
+        let charge_tech = info.charge_technology.trim().parse::<i32>().unwrap_or(0);
+        let svooc = i32::from(fast_type >= 2);
+        let pps = i32::from(info.pd_verified != 0 || charge_tech >= 3);
+        let dual_chan = i32::from(info.cell1_vol > 0 && info.cell2_vol > 0);
         format!(
-            "usb_online={};usb_type={};usb_real_type={};ac_online={};pc_port={};batt_status={};batt_health={};capacity={};temp={:.1};current={:.1};voltage={:.3};charge_type={};technology={};battery_type={};soh={};fast_chg_type={};charge_tech={};wireless={};wireless_type={};input_current={};charge_full={};fcc={};rm={};design_capacity={};qmax={};adapter_power={};cp_online={};cp_iin_m={};cp_iin_s={};pd_verified={};quick_charge_type={};die_temp={};typec_mode={};cc_orientation={};remaining_time={};smart_chg={};night_chg={};sport={};input_suspend={};moisture={};cell1_v={};cell2_v={};fg_qmax={};fg_ai={};fg_avg_cur={};fg_vendor={};authentic={};max_life_t={};max_life_v={};board_temp={};flash={};hifi={};fake_soc={};fake_soh={}",
-            info.usb_online, info.usb_type, info.usb_real_type, info.ac_online, info.pc_port_online,
-            info.battery_status, info.battery_health, info.battery_capacity,
-            temp_c, current_ma, voltage_v, info.battery_charge_type,
-            info.battery_technology, battery_type, soh, info.fast_charge_type, info.charge_technology,
-            info.wireless_online, info.wireless_type,
-            info.input_current_max, fcc_mah, fcc_mah, rm_mah, design_mah, qmax_mah,
-            info.adapter_power_w, info.cp_online, info.cp_master_iin, info.cp_slave_iin,
-            info.pd_verified, info.quick_charge_type,
-            info.die_temperature, info.typec_mode, info.cc_orientation,
-            info.remaining_time, info.smart_chg, info.night_charging, info.sport_mode,
-            info.input_suspend, info.moisture_detected as i32,
-            info.cell1_vol, info.cell2_vol,
-            info.fg_qmax, info.fg_ai, info.fg_avg_current, info.fg_vendor,
-            info.authentic, info.max_life_temp, info.max_life_vol,
-            info.thermal_board_temp,
-            info.flash_active as i32, info.hifi_connect as i32,
-            info.fake_soc, info.fake_soh
+            concat!(
+                "bcc_exp_status={}\n",
+                "battery_capacity={}\n",
+                "battery_voltage_now={}\n",
+                "battery_voltage_min={}\n",
+                "battery_temp={}\n",
+                "battery_current_now={}\n",
+                "battery_charge_now={}\n",
+                "battery_sub_current={}\n",
+                "usb_fast_chg_type={}\n",
+                "battery_voocchg_ing={}\n",
+                "battery_ppschg_ing={}\n",
+                "battery_ppschg_power={}\n",
+                "usb_input_current_now={}\n",
+                "battery_short_ic_otp_status={}\n",
+                "battery_authenticate={}\n",
+                "battery_bqfs_status={}\n",
+                "gauge_ibat_deviation={}\n",
+                "battery_charge_technology={}\n",
+                "parallel_chg_mos_status={}\n",
+                "wireless_current_now={}\n",
+                "wireless_rx_version={}\n",
+                "wireless_tx_version={}\n",
+                "wireless_idt_adc_test={}\n",
+                "wireless_enable_tx=4\n",
+                "battery_status=1\n",
+                "wireless_voltage_now={}\n",
+                "wireless_real_type={}\n",
+                "wireless_charger_type={}\n",
+                "wireless_charge_pump_en={}\n",
+                "wireless_deviated={}\n",
+                "battery_temp_not_plug={}\n",
+                "battery_voltage_max_not_plug={}\n",
+                "battery_voltage_min_not_plug={}\n",
+                "dual_chan_support={}\n",
+                "dual_chan_vbat_status={}\n",
+                "dual_chan_buck_status={}\n",
+                "dual_chan_temp_range_status={}\n",
+                "chargerAcOnline={}\n",
+                "{}\n",
+                "bob_status={}\n",
+                "bob_status_reg={}\n",
+                "ttf_info={},{}\n",
+                "bsl_data={}\n",
+                "eis_data={}\n",
+                "battery_type_str={}\n",
+                "batt_chemID={}\n",
+                "battery_uisoh={}\n",
+                "battery_uisoh_is_100={}\n",
+                "battery_realsoh={}\n"
+            ),
+            0,
+            info.battery_capacity,
+            info.battery_voltage_now,
+            0,
+            info.battery_temp,
+            info.battery_current_now,
+            charge_counter,
+            0,
+            fast_type,
+            svooc,
+            pps,
+            info.adapter_power_w,
+            info.usb_current_now,
+            SHORT_CIRCUIT_HEALTHY,
+            info.authentic,
+            0,
+            0,
+            charge_tech,
+            0,
+            0,
+            "",
+            "",
+            0,
+            "",
+            "",
+            0,
+            "",
+            "",
+            0,
+            0,
+            0,
+            dual_chan,
+            0,
+            0,
+            0,
+            info.ac_online,
+            "",
+            0,
+            0,
+            info.remaining_time,
+            0,
+            "",
+            "",
+            battery_type,
+            info.battery_technology,
+            soh,
+            i32::from(soh == 100),
+            soh,
         )
     }
 
@@ -1972,44 +1266,17 @@ impl Adapter {
             clamp_i64_to_i32(abs_i32_to_i64(info.battery_current_now))
         }
     }
+    /// `getPsyBatteryStatus` payload.
+    ///
+    /// The OPlus HAL returns the raw contents of the battery status node, so
+    /// that is what this returns. The previous implementation built a 17-field
+    /// comma string, which the ColorOS client cannot parse; see
+    /// `chargehal-vendor-refs/FORMAT-CONTRACT.md` §3.
+    ///
+    /// The value is trimmed here while the kernel node keeps its trailing
+    /// newline. Clients parse by token, so the difference is harmless.
     pub fn get_battery_status(&self) -> String {
-        let info = self.info.lock();
-        let snapshot = self.get_fast_charge_snapshot();
-        let fcc = Self::best_fcc_mah(&info);
-        let design_capacity = Self::best_design_capacity_mah(&info);
-        let charge_counter = Self::best_charge_counter_mah(&info);
-        let rm = Self::best_rm_mah(&info);
-        let qmax = Self::best_qmax_mah(&info);
-        let battery_type = Self::best_battery_type(&info);
-        let status = if *self.charge_control_active.lock()
-            && (snapshot.usb_online != 0 || snapshot.ac_online != 0)
-        {
-            "Charging"
-        } else if !snapshot.online && info.battery_status.eq_ignore_ascii_case("Charging") {
-            "Discharging"
-        } else {
-            &info.battery_status
-        };
-        format!(
-            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
-            status,
-            info.battery_capacity,
-            info.battery_voltage_now,
-            info.battery_current_now,
-            info.battery_temp,
-            info.battery_health,
-            info.battery_technology,
-            battery_type,
-            info.battery_charge_type,
-            fcc,
-            design_capacity,
-            charge_counter,
-            rm,
-            qmax,
-            info.fast_charge_type,
-            info.input_current_max,
-            info.authentic
-        )
+        self.info.lock().battery_status.clone()
     }
     pub fn get_battery_rm(&self) -> i32 {
         Self::best_rm_mah(&self.info.lock())
@@ -2125,22 +1392,9 @@ impl Adapter {
         let mut applied = self.charge_control_applied.lock();
         *self.charge_control_active.lock() = restrict;
         if *applied != Some(restrict) {
-            self.apply_charge_control_limit(restrict);
+            self.backend.set_charge_control(restrict);
             *applied = Some(restrict);
         }
-    }
-    fn apply_charge_control_limit(&self, restrict: bool) {
-        let restricted_value;
-        let value = if restrict {
-            restricted_value =
-                restricted_charge_control_value(read_int_any(CHARGE_CONTROL_LIMIT_MAX_PATHS));
-            restricted_value.as_str()
-        } else {
-            CHARGE_CONTROL_LIMIT_RELEASED
-        };
-        write_string_any(CHARGE_CONTROL_LIMIT_PATHS, value);
-        write_string_any(COOL_MODE_PATHS, if restrict { "1" } else { "0" });
-        write_string_any(COOL_DOWN_PATHS, if restrict { "1" } else { "0" });
     }
     pub fn get_battery_authenticate(&self) -> i32 {
         1
@@ -2158,30 +1412,9 @@ impl Adapter {
 
 #[cfg(test)]
 mod tests {
-    use super::{Adapter, ChargerInfo, FastChargeInputs};
+    use super::{Adapter, ChargerInfo};
     use std::sync::{mpsc::sync_channel, Arc};
     use std::time::Duration;
-
-    fn fast_inputs<'a>(
-        quick_charge_type: &'a str,
-        pd_verified: i32,
-        cp_online: i32,
-        adapter_power_w: i32,
-        online: bool,
-    ) -> FastChargeInputs<'a> {
-        FastChargeInputs {
-            quick_charge_type,
-            fastchg_mode: 0,
-            sport_mode: 0,
-            pd_verified,
-            cp_online,
-            usb_type: "",
-            adapter_power_w,
-            online,
-            usb_online: online as i32,
-            pc_port_online: 0,
-        }
-    }
 
     #[test]
     fn screen_notification_never_waits_for_poll_or_control_locks() {
@@ -2200,87 +1433,6 @@ mod tests {
         });
 
         assert!(done_rx.recv_timeout(Duration::from_millis(250)).is_ok());
-    }
-
-    #[test]
-    fn qct4_rechecks_33w_and_returns_highest_power() {
-        let mut powers = [33, 33, 67, 65, 67].into_iter();
-        let power = Adapter::stable_adapter_power_w_with(
-            33,
-            "4",
-            || "4".into(),
-            || powers.next().unwrap_or(33),
-            || {},
-        );
-        assert_eq!(power, 67);
-    }
-
-    #[test]
-    fn non_qct4_keeps_33w_without_power_reads() {
-        let mut reads = 0;
-        let power = Adapter::stable_adapter_power_w_with(
-            33,
-            "3",
-            || "3".into(),
-            || {
-                reads += 1;
-                67
-            },
-            || {},
-        );
-        assert_eq!(power, 33);
-        assert_eq!(reads, 0);
-    }
-
-    #[test]
-    fn non_33w_power_does_not_recheck() {
-        let mut reads = 0;
-        let power = Adapter::stable_adapter_power_w_with(
-            67,
-            "4",
-            || "4".into(),
-            || {
-                reads += 1;
-                33
-            },
-            || {},
-        );
-        assert_eq!(power, 67);
-        assert_eq!(reads, 0);
-    }
-
-    #[test]
-    fn direct_fast_classifier_detects_qct4_immediately() {
-        assert_eq!(
-            Adapter::classify_fast_charge_values(fast_inputs("4", 0, 0, 0, true)),
-            3
-        );
-        assert_eq!(Adapter::classify_charge_technology_values("4", 3), 3);
-        assert_eq!(
-            Adapter::classify_fast_charge_values(fast_inputs("4", 1, 1, 67, false)),
-            0
-        );
-    }
-
-    #[test]
-    fn direct_fast_classifier_uses_pd_cp_and_power_fallbacks() {
-        assert_eq!(
-            Adapter::classify_fast_charge_values(fast_inputs("", 1, 0, 0, true)),
-            3
-        );
-        assert_eq!(
-            Adapter::classify_fast_charge_values(fast_inputs("", 0, 1, 0, true)),
-            3
-        );
-        assert_eq!(
-            Adapter::classify_fast_charge_values(fast_inputs("", 0, 0, 21, true)),
-            3
-        );
-        assert_eq!(
-            Adapter::classify_fast_charge_values(fast_inputs("0", 1, 0, 0, true)),
-            3
-        );
-        assert_eq!(Adapter::classify_charge_technology_values("0", 3), 3);
     }
 
     #[test]
@@ -2308,140 +1460,6 @@ mod tests {
     }
 
     #[test]
-    fn computer_usb_overrides_all_stale_fast_charge_evidence() {
-        let inputs = FastChargeInputs {
-            quick_charge_type: "4",
-            fastchg_mode: 1,
-            sport_mode: 1,
-            pd_verified: 1,
-            cp_online: 1,
-            usb_type: "USB_SDP",
-            adapter_power_w: 67,
-            online: true,
-            usb_online: 1,
-            pc_port_online: 1,
-        };
-        assert_eq!(Adapter::classify_fast_charge_values(inputs), 0);
-
-        let snapshot = super::FastChargeSnapshot {
-            online: true,
-            usb_online: 1,
-            ac_online: 0,
-            wireless_online: 0,
-            fast_type: 3,
-            charge_tech: 3,
-            quick_charge_type: "4".into(),
-            pd_verified: 1,
-            cp_online: 1,
-            fastchg_mode: 1,
-            sport_mode: 1,
-            adapter_power_w: 67,
-            usb_type: "USB_SDP".into(),
-            pc_port_online: 1,
-        };
-        assert!(!snapshot.is_fast_charge());
-        assert!(!snapshot.is_svooc_active());
-        assert!(!snapshot.is_pps_active());
-        assert!(!snapshot.should_show_power());
-    }
-
-    #[test]
-    fn disconnect_clears_the_entire_fast_charge_session() {
-        let mut info = ChargerInfo {
-            usb_type: "USB_PD".into(),
-            usb_real_type: "USB_PD".into(),
-            quick_charge_type: "4".into(),
-            pd_verified: 1,
-            cp_online: 1,
-            cp_status: "Charging".into(),
-            cp_bus_voltage: 20_000_000,
-            cp_bus_current: 3_000_000,
-            cp_master_iin: 1_500_000,
-            cp_slave_iin: 1_500_000,
-            fastchg_mode: 1,
-            sport_mode: 1,
-            adapter_power_w: 67,
-            fast_charge_type: "3".into(),
-            charge_technology: "3".into(),
-            ..Default::default()
-        };
-        Adapter::clear_fast_charge_session(&mut info);
-        assert!(info.usb_type.is_empty());
-        assert!(info.usb_real_type.is_empty());
-        assert!(info.quick_charge_type.is_empty());
-        assert_eq!(info.pd_verified, 0);
-        assert_eq!(info.cp_online, 0);
-        assert_eq!(info.adapter_power_w, 0);
-        assert_eq!(info.fast_charge_type, "0");
-        assert_eq!(info.charge_technology, "0");
-    }
-
-    #[test]
-    fn estimates_remaining_time_from_capacity_and_current() {
-        let info = super::ChargerInfo {
-            usb_online: 1,
-            battery_status: "Charging".into(),
-            battery_capacity: 50,
-            fg_fcc: 4000,
-            fg_rm: 2000,
-            battery_current_now: -2_000_000,
-            ..Default::default()
-        };
-
-        assert_eq!(Adapter::estimate_remaining_time_seconds(&info), 3600);
-    }
-
-    #[test]
-    fn normalizes_remaining_time_node_units() {
-        let info = super::ChargerInfo {
-            usb_online: 1,
-            remaining_time: 3_600_000,
-            ..Default::default()
-        };
-
-        assert_eq!(Adapter::estimate_remaining_time_seconds(&info), 3600);
-    }
-
-    #[test]
-    fn bypass_bool_parser_accepts_common_enabled_values() {
-        assert!(Adapter::bool_like("1"));
-        assert!(Adapter::bool_like("enable"));
-        assert!(Adapter::bool_like("on"));
-        assert!(!Adapter::bool_like("0"));
-        assert!(!Adapter::bool_like("disable"));
-    }
-
-    #[test]
-    fn parses_coloros_bypass_switch_payload() {
-        assert!(Adapter::parse_bypass_switch("1+switch=1"));
-        assert!(!Adapter::parse_bypass_switch("1+switch=0"));
-    }
-
-    #[test]
-    fn parses_coloros_charge_limit_state_payload() {
-        assert_eq!(
-            Adapter::parse_charge_limit_state_payload("2++1+80"),
-            (1, Some(80))
-        );
-        assert_eq!(
-            Adapter::parse_charge_limit_state_payload("2++0+90"),
-            (0, Some(90))
-        );
-    }
-
-    #[test]
-    fn parses_coloros_charge_limit_control_payload() {
-        assert_eq!(
-            Adapter::parse_charge_limit_control_payload("4++1+80+1+80"),
-            (1, Some(80), 1, Some(80))
-        );
-        assert_eq!(
-            Adapter::parse_charge_limit_control_payload("4++0+80+0+80"),
-            (0, Some(80), 0, Some(80))
-        );
-    }
-
-    #[test]
     fn charge_limit_latch_holds_at_boundary() {
         assert!(Adapter::charge_limit_latch_state(false, true, 91, Some(90)));
         assert!(Adapter::charge_limit_latch_state(false, true, 95, Some(95)));
@@ -2454,60 +1472,6 @@ mod tests {
             95,
             Some(95)
         ));
-    }
-
-    #[test]
-    fn normalizes_capacity_without_decimal_pollution() {
-        assert_eq!(super::normalize_battery_capacity(89), 89);
-        assert_eq!(super::normalize_battery_capacity(8999), 89);
-        assert_eq!(super::normalize_battery_capacity(10000), 100);
-    }
-
-    #[test]
-    fn integer_fallback_skips_unreadable_or_invalid_nodes() {
-        let directory =
-            std::env::temp_dir().join(format!("chargerhal-read-fallback-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&directory);
-        std::fs::create_dir_all(&directory).unwrap();
-        let invalid = directory.join("invalid");
-        let valid = directory.join("valid");
-        std::fs::write(&invalid, "not-a-number\n").unwrap();
-        std::fs::write(&valid, "67\n").unwrap();
-
-        assert_eq!(
-            super::read_int_any(&[invalid.to_str().unwrap(), valid.to_str().unwrap()]),
-            67
-        );
-
-        std::fs::remove_dir_all(directory).unwrap();
-    }
-
-    #[test]
-    fn transient_sysfs_failures_preserve_cached_values() {
-        let directory =
-            std::env::temp_dir().join(format!("chargerhal-cache-preserve-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&directory);
-        std::fs::create_dir_all(&directory).unwrap();
-        let missing = directory.join("missing");
-        let value_path = directory.join("value");
-
-        let mut integer = 42;
-        super::update_int_from_paths(&mut integer, &[missing.to_str().unwrap()]);
-        assert_eq!(integer, 42);
-
-        std::fs::write(&value_path, "0\n").unwrap();
-        super::update_int_from_paths(&mut integer, &[value_path.to_str().unwrap()]);
-        assert_eq!(integer, 0);
-
-        let mut text = "cached".to_string();
-        super::update_non_empty_string_from_paths(&mut text, &[missing.to_str().unwrap()]);
-        assert_eq!(text, "cached");
-
-        std::fs::write(&value_path, "Charging\n").unwrap();
-        super::update_non_empty_string_from_paths(&mut text, &[value_path.to_str().unwrap()]);
-        assert_eq!(text, "Charging");
-
-        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
@@ -2533,61 +1497,6 @@ mod tests {
             Adapter::poll_interval(false, false),
             super::SCREEN_OFF_IDLE_POLL_INTERVAL
         );
-    }
-
-    #[test]
-    fn lightweight_probe_only_escalates_on_power_source_changes() {
-        let snapshot = super::FastChargeSnapshot {
-            usb_online: 1,
-            ac_online: 0,
-            wireless_online: 0,
-            pc_port_online: 0,
-            quick_charge_type: "4".into(),
-            usb_type: "USB_PD".into(),
-            ..Default::default()
-        };
-
-        assert!(!Adapter::power_source_probe_values_changed(
-            &snapshot,
-            Some(1),
-            Some(0),
-            Some(0),
-            Some(0),
-            Some("4"),
-            Some("USB_PD"),
-        ));
-        assert!(Adapter::power_source_probe_values_changed(
-            &snapshot,
-            Some(0),
-            Some(0),
-            Some(0),
-            Some(0),
-            Some("4"),
-            Some("USB_PD"),
-        ));
-        assert!(Adapter::power_source_probe_values_changed(
-            &snapshot,
-            None,
-            None,
-            None,
-            None,
-            Some("0"),
-            None,
-        ));
-    }
-
-    #[test]
-    fn full_scan_honors_screen_transition_cancellation() {
-        let checks = std::cell::Cell::new(0);
-        let mut info = ChargerInfo::default();
-        let completed = Adapter::poll_once(&mut info, || {
-            let next = checks.get() + 1;
-            checks.set(next);
-            next >= 2
-        });
-
-        assert!(!completed);
-        assert!(checks.get() >= 2);
     }
 
     #[test]
@@ -2681,12 +1590,5 @@ mod tests {
         let (start, end) = Adapter::synthetic_decimal_soc_pair(&mut state, 89, 8942, 20);
         assert_eq!(start, 8942);
         assert_eq!(end, 8945);
-    }
-
-    #[test]
-    fn restricted_charge_control_uses_max_minus_one() {
-        assert_eq!(super::restricted_charge_control_value(16), "15");
-        assert_eq!(super::restricted_charge_control_value(2), "1");
-        assert_eq!(super::restricted_charge_control_value(0), "15");
     }
 }

@@ -1,23 +1,24 @@
 use std::env;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-fn main() {
-    let aidl_dir = PathBuf::from("aidl/vendor/oplus/hardware/charger");
-
-    println!("cargo:rerun-if-changed=aidl/vendor/oplus/hardware/charger/ICharger.aidl");
-
-    let out_dir = env::var("OUT_DIR").unwrap();
-    let out_file = PathBuf::from(out_dir).join("charger.rs");
-
+/// Generate Rust bindings for one AIDL interface and patch the two interface
+/// metadata transaction codes that rsbinder-aidl does not emit correctly.
+///
+/// AIDL fixes getInterfaceVersion at 0x00FFFFFF and getInterfaceHash at
+/// 0x00FFFFFE. Both our OPlus server side and the Xiaomi client side need those
+/// exact values, so the generated file is rewritten before compilation and the
+/// build fails loudly if the expected lines disappear.
+fn generate(source: &Path, out_file: &Path, label: &str) {
     rsbinder_aidl::Builder::new()
-        .source(aidl_dir.join("ICharger.aidl"))
-        .output(out_file.clone())
+        .source(source)
+        .output(out_file)
         .generate()
-        .expect("Failed to generate AIDL bindings for ICharger");
+        .unwrap_or_else(|error| panic!("failed to generate AIDL bindings for {label}: {error}"));
 
-    let generated =
-        fs::read_to_string(&out_file).expect("Failed to read generated ICharger bindings");
+    let generated = fs::read_to_string(out_file)
+        .unwrap_or_else(|error| panic!("failed to read generated {label} bindings: {error}"));
+
     let mut version_code_patched = false;
     let mut hash_code_patched = false;
     let generated = generated
@@ -37,9 +38,31 @@ fn main() {
         })
         .collect::<Vec<_>>()
         .join("\n");
+
     assert!(
         version_code_patched && hash_code_patched,
-        "Generated AIDL bindings no longer contain interface metadata transaction constants"
+        "generated {label} bindings no longer contain interface metadata transaction constants"
     );
-    fs::write(out_file, generated).expect("Failed to patch generated ICharger transaction codes");
+    fs::write(out_file, generated).unwrap_or_else(|error| {
+        panic!("failed to patch generated {label} transaction codes: {error}")
+    });
+}
+
+fn main() {
+    println!("cargo:rerun-if-changed=aidl/vendor/oplus/hardware/charger/ICharger.aidl");
+    println!("cargo:rerun-if-changed=aidl/vendor/xiaomi/hardware/micharge/IMiCharge.aidl");
+
+    let out_dir = env::var("OUT_DIR").unwrap();
+
+    generate(
+        &PathBuf::from("aidl/vendor/oplus/hardware/charger/ICharger.aidl"),
+        &PathBuf::from(&out_dir).join("charger.rs"),
+        "ICharger",
+    );
+
+    generate(
+        &PathBuf::from("aidl/vendor/xiaomi/hardware/micharge/IMiCharge.aidl"),
+        &PathBuf::from(&out_dir).join("micharge.rs"),
+        "IMiCharge",
+    );
 }
