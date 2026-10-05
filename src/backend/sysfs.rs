@@ -1097,6 +1097,12 @@ pub fn apply_charge_control_limit(restrict: bool) {
         CHARGE_CONTROL_LIMIT_RELEASED
     };
     write_string_any(CHARGE_CONTROL_LIMIT_PATHS, value);
+    // The vendor no-charge gate is the stronger of the two controls: with it set
+    // the pack current falls to zero while the charger stays online. The current
+    // limit alone still leaves the pack charging at its lowest step, which is
+    // still several watts on the test device. Devices without the node keep the
+    // limit as their only lever.
+    write_string_any(&[NIGHT_CHARGING], if restrict { "1" } else { "0" });
 }
 
 // ── Backend ──

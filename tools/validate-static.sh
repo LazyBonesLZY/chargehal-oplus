@@ -262,6 +262,9 @@ SYSFS_CTRL="$(sed -n '/pub fn apply_charge_control_limit/,/^}/p' "$SYSFS")"
 if printf '%s\n' "$SYSFS_CTRL" | rg 'INPUT_SUSPEND'; then
     fail "apply_charge_control_limit writes input_suspend: the charger drops offline and bypass charging is closed"
 fi
+if ! printf '%s\n' "$SYSFS_CTRL" | rg -q 'NIGHT_CHARGING'; then
+    fail "apply_charge_control_limit no longer drives the no-charge gate; the current limit alone still charges the pack"
+fi
 
 # ── Hardware bypass stays with the HAL ──
 #

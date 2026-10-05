@@ -816,7 +816,15 @@ impl Adapter {
     }
 
     fn charge_limit_target(&self) -> Option<i32> {
-        self.chg_up_limit_value.lock().trim().parse::<i32>().ok()
+        // A value outside 1..=100 must not drive the latch: `0` makes
+        // `capacity >= limit` true at any level, so the pack would be held back
+        // everywhere instead of at the requested percentage.
+        self.chg_up_limit_value
+            .lock()
+            .trim()
+            .parse::<i32>()
+            .ok()
+            .filter(|value| (1..=100).contains(value))
     }
 
     fn charge_limit_latch_state(
