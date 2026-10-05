@@ -171,12 +171,6 @@ const CHARGE_STOP_THRESHOLD_PATHS: &[&str] = &[
     "/sys/class/power_supply/battery/charge_control_end_threshold",
     "/sys/class/power_supply/battery/charge_stop_threshold",
 ];
-const CHARGE_LIMIT_STATE_PATHS: &[&str] = &[
-    "/sys/class/power_supply/battery/smart_chg",
-    "/sys/class/qcom-battery/smart_chg",
-    "/sys/class/power_supply/battery/night_charging",
-    "/sys/class/qcom-battery/night_charging",
-];
 const BYPASS_STATUS_PATHS: &[&str] = &[
     "/sys/class/power_supply/battery/bypass_charging",
     "/sys/class/qcom-battery/bypass_charging",
@@ -611,7 +605,10 @@ impl Adapter {
                         .swap(false, Ordering::AcqRel)
                     {
                         thread::sleep(SCREEN_WAKE_SCAN_DEFER);
-                        adapter_clone.wake_poll_worker();
+                        // A bare wake is ignored by the loop below unless a
+                        // refresh was requested. Without this, the deferred
+                        // scan never runs.
+                        adapter_clone.request_refresh();
                         continue;
                     }
                     let refresh_requested =
@@ -974,6 +971,9 @@ impl Adapter {
         let previous = self.screen_on.swap(screen_on, Ordering::Relaxed);
         if previous != screen_on {
             self.screen_wake_pending.store(true, Ordering::Release);
+            // The poll thread may be parked for the full idle interval.
+            // Waking it only enqueues a token; the worker applies the defer.
+            self.wake_poll_worker();
         }
     }
 
@@ -1401,7 +1401,9 @@ impl Adapter {
         } else {
             self.update_charge_limit_latch();
         }
-        write_string_any(CHARGE_LIMIT_STATE_PATHS, &enabled.to_string());
+        // The on/off flag stays in memory and is applied through
+        // `set_charge_control`. `smart_chg` and `night_charging` are separate
+        // features; writing the limit switch into them turns night charging on.
         self.set_charge_control_active(self.desired_charge_control_active());
     }
     pub fn get_bypass_charge_status(&self) -> String {
@@ -1425,7 +1427,7 @@ impl Adapter {
         }
     }
     pub fn get_battery_authenticate(&self) -> i32 {
-        1
+        self.info.lock().authentic
     }
     pub fn get_battery_short_status(&self) -> i32 {
         SHORT_CIRCUIT_HEALTHY

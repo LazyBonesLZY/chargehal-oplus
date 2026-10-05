@@ -167,12 +167,13 @@ fi
 # ── Screen notification must stay a pure atomic transition marker ──
 
 SCREEN_BODY="$(sed -n '/pub fn notify_screen_status/,/^    }/p' "$ADAPTER")"
-if printf '%s\n' "$SCREEN_BODY" | rg 'read_|write_|sleep|\.lock\(|request_refresh|thread::|setpriority|tracing::|try_send|wake_poll_worker'; then
+if printf '%s\n' "$SCREEN_BODY" | rg 'read_|write_|sleep|\.lock\(|request_refresh|thread::|setpriority|tracing::'; then
     fail "blocking or I/O work found in notify_screen_status"
 fi
 if ! printf '%s\n' "$SCREEN_BODY" | rg -q 'screen_on\.swap' \
-    || ! printf '%s\n' "$SCREEN_BODY" | rg -q 'screen_wake_pending\.store'; then
-    fail "notify_screen_status is not a pure atomic transition marker"
+    || ! printf '%s\n' "$SCREEN_BODY" | rg -q 'screen_wake_pending\.store' \
+    || ! printf '%s\n' "$SCREEN_BODY" | rg -q 'wake_poll_worker'; then
+    fail "notify_screen_status must mark the transition and wake the poll worker"
 fi
 
 WAKE_BODY="$(sed -n '/fn wake_poll_worker/,/^    }/p' "$ADAPTER")"

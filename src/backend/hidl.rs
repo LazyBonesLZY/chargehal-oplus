@@ -35,8 +35,9 @@
 //! * Dual-family nodes, branch-selected, copied verbatim (grade C, never
 //!   scaled): `authentic`, `real_type`, `quick_charge_type`, `pd_authentication`
 //!   / `pd_verifed`, `fastcharge_mode` / `fastchg_mode`, `soh`, `input_suspend`,
-//!   `night_charging`, `smart_batt`, `soc_decimal`(+`_rate`), car-adapter type,
-//!   `power_max`.
+//!   `night_charging`, `smart_batt`, `soc_decimal`(+`_rate`), car-adapter type.
+//!   `power_max` is the one exception: it goes through the shared W/mW/µW
+//!   heuristic instead of being copied raw.
 //! * Data-port detection uses this generation's own signal: `has_dp` — the node
 //!   `isDPConnected` reads — feeds `pc_port_online`, and `real_type` feeds the
 //!   USB-type check. `usb_type` itself is not read because that node exists on
@@ -289,7 +290,7 @@ impl ChargeBackend for HidlBackend {
         // ── Online / identity stage ──
         sysfs::update_int_from_paths(&mut info.usb_online, &[&format!("{PSY_USB}/online")]);
         sysfs::update_int_from_paths(&mut info.ac_online, &[&format!("{PSY_AC}/online")]);
-        sysfs::update_int_from_paths(
+        sysfs::update_online_from_paths(
             &mut info.wireless_online,
             &[
                 &format!("{PSY_WIRELESS}/online"),
@@ -404,7 +405,7 @@ impl ChargeBackend for HidlBackend {
             &self.last_probe.lock(),
             sysfs::try_read_int(&usb_online_path),
             sysfs::try_read_int(&ac_online_path),
-            sysfs::try_read_int_any(&[&wireless_online_path, &dc_online_path]),
+            sysfs::try_read_online_any(&[&wireless_online_path, &dc_online_path]),
             sysfs::try_read_int(HAS_DP[b]),
             (!quick_charge_type.is_empty()).then_some(quick_charge_type.as_str()),
             (!real_type.is_empty()).then_some(real_type.as_str()),

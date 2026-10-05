@@ -64,6 +64,64 @@ pub fn update_non_empty_string_from_paths(target: &mut String, paths: &[&str]) {
         }
     }
 }
+
+/// Online flag that lives on more than one supply.
+///
+/// A readable `0` must not hide a later supply that is online, and a miss
+/// must not look like "offline". `None` means every path was unreadable.
+pub fn try_read_online_any(paths: &[&str]) -> Option<i32> {
+    merge_online_readings(paths.iter().map(|path| try_read_int(path)))
+}
+
+pub fn update_online_from_paths(target: &mut i32, paths: &[&str]) {
+    if let Some(value) = try_read_online_any(paths) {
+        *target = value;
+    }
+}
+
+fn merge_online_readings(readings: impl IntoIterator<Item = Option<i32>>) -> Option<i32> {
+    let mut saw_any = false;
+    for value in readings.into_iter().flatten() {
+        saw_any = true;
+        if value != 0 {
+            return Some(value);
+        }
+    }
+    saw_any.then_some(0)
+}
+
+fn update_bool_from_path(target: &mut bool, path: &str) {
+    if let Some(value) = try_read_int(path) {
+        *target = value != 0;
+    }
+}
+
+/// Apply a USB identity reading without letting a failed `real_type` read
+/// erase the previous one.
+///
+/// `real_type` wins when it is non-empty. When that read fails and a previous
+/// real type is still cached, the generic `type` node is ignored: on these
+/// kernels it often says `USB` for every USB source, and feeding that into
+/// the data-port check would suppress fast charge. The generic node is only
+/// a fallback while no real type is known.
+pub fn apply_usb_type_reading(info: &mut ChargerInfo, real_type: &str, fallback_type: &str) {
+    let real_type = real_type.trim();
+    if !real_type.is_empty() {
+        info.usb_real_type.clear();
+        info.usb_real_type.push_str(real_type);
+        info.usb_type.clear();
+        info.usb_type.push_str(real_type);
+        return;
+    }
+    if !info.usb_real_type.is_empty() {
+        return;
+    }
+    let fallback_type = fallback_type.trim();
+    if !fallback_type.is_empty() {
+        info.usb_type.clear();
+        info.usb_type.push_str(fallback_type);
+    }
+}
 pub fn read_positive_int_any(paths: &[&str]) -> i32 {
     for p in paths {
         let value = read_int(p);
@@ -338,11 +396,6 @@ pub const CHARGE_CONTROL_LIMIT_MAX_PATHS: &[&str] = &[
     "/sys/class/power_supply/battery/charge_control_limit_max",
     "/sys/class/qcom-battery/charge_control_limit_max",
 ];
-pub const COOL_MODE_PATHS: &[&str] = &[
-    "/sys/class/power_supply/main/cool_mode",
-    "/sys/class/qcom-battery/cool_mode",
-];
-pub const COOL_DOWN_PATHS: &[&str] = &["/sys/class/power_supply/battery/cool_down"];
 pub const INPUT_SUSPEND_PATHS: &[&str] = &[
     "/sys/class/power_supply/battery/input_suspend",
     "/sys/class/qcom-battery/input_suspend",
@@ -411,9 +464,8 @@ where
     }
     let b = PSY_BATTERY;
     update_int_from_paths(&mut info.usb_online, &[&format!("{}/online", PSY_USB)]);
-    update_non_empty_string_from_paths(&mut info.usb_type, &[&format!("{}/type", PSY_USB)]);
     update_int_from_paths(&mut info.ac_online, &[&format!("{}/online", PSY_AC)]);
-    update_int_from_paths(
+    update_online_from_paths(
         &mut info.wireless_online,
         &[
             &format!("{}/online", PSY_WIRELESS),
@@ -441,10 +493,12 @@ where
 
     update_int_from_paths(&mut info.usb_temp, USB_CONNECTOR_TEMP_PATHS);
     update_int_from_paths(&mut info.connector_temp, USB_CONNECTOR_TEMP_PATHS);
-    info.usb_real_type = read_string_any(QCOM_REAL_TYPE_PATHS);
-    if !info.usb_real_type.is_empty() {
-        info.usb_type = info.usb_real_type.clone();
-    }
+    let usb_type_path = format!("{}/type", PSY_USB);
+    apply_usb_type_reading(
+        info,
+        &read_string_any(QCOM_REAL_TYPE_PATHS),
+        &read_string(&usb_type_path),
+    );
     update_non_empty_string_from_paths(&mut info.typec_mode, &[TYPEC_MODE]);
     update_int_from_paths(&mut info.cc_orientation, &[CC_ORIENTATION]);
     if should_cancel() {
@@ -477,88 +531,99 @@ where
         return false;
     }
 
-    info.fg_fcc = read_int(FG_FCC_PATHS[0]);
-    info.charge_full = read_int_any(FG_FCC_PATHS);
-    info.fg_rm = read_int(FG_RM_PATHS[0]);
-    info.fg_rsoc = read_int(FG_RSOC);
-    info.fg_cycle = read_int(FG_CYCLE_PATHS[0]);
-    info.fg_soh = read_int_any(FG_SOH_PATHS);
-    info.fg_qmax = read_int_any(FG_QMAX_PATHS);
-    info.fg_ai = read_int(FG_AI);
-    info.fg_avg_current = read_int(FG_AVG_CURRENT);
-    info.fg_vendor = read_string(FG_VENDOR);
-    info.battery_type = read_non_empty_string_any(BATTERY_TYPE_PATHS);
-    info.gauge_type = info.fg_vendor.clone();
+    update_int_from_paths(&mut info.fg_fcc, &[FG_FCC_PATHS[0]]);
+    update_int_from_paths(&mut info.charge_full, FG_FCC_PATHS);
+    update_int_from_paths(&mut info.fg_rm, &[FG_RM_PATHS[0]]);
+    update_int_from_paths(&mut info.fg_rsoc, &[FG_RSOC]);
+    update_int_from_paths(&mut info.fg_cycle, &[FG_CYCLE_PATHS[0]]);
+    update_int_from_paths(&mut info.fg_soh, FG_SOH_PATHS);
+    update_int_from_paths(&mut info.fg_qmax, FG_QMAX_PATHS);
+    update_int_from_paths(&mut info.fg_ai, &[FG_AI]);
+    update_int_from_paths(&mut info.fg_avg_current, &[FG_AVG_CURRENT]);
+    update_non_empty_string_from_paths(&mut info.fg_vendor, &[FG_VENDOR]);
+    update_non_empty_string_from_paths(&mut info.battery_type, BATTERY_TYPE_PATHS);
+    if !info.fg_vendor.is_empty() {
+        info.gauge_type = info.fg_vendor.clone();
+    }
     info.gauge_info.clear();
-    info.charge_full_design = read_int_any(CHARGE_FULL_DESIGN_PATHS);
+    update_int_from_paths(&mut info.charge_full_design, CHARGE_FULL_DESIGN_PATHS);
     if info.charge_full_design == 0 {
         info.charge_full_design = info.charge_full;
     }
-    info.charge_counter = read_int_any(CHARGE_COUNTER_PATHS);
+    update_int_from_paths(&mut info.charge_counter, CHARGE_COUNTER_PATHS);
     if info.charge_counter == 0 {
         info.charge_counter = info.fg_rm;
     }
-    info.cycle_count = read_int_any(FG_CYCLE_PATHS);
+    update_int_from_paths(&mut info.cycle_count, FG_CYCLE_PATHS);
     if should_cancel() {
         return false;
     }
 
-    info.cell1_vol = read_int(FG_CELL1_VOL);
-    info.cell2_vol = read_int(FG_CELL2_VOL);
-    info.cell1_rascale = read_int(FG_CELL1_RASCALE);
+    update_int_from_paths(&mut info.cell1_vol, &[FG_CELL1_VOL]);
+    update_int_from_paths(&mut info.cell2_vol, &[FG_CELL2_VOL]);
+    update_int_from_paths(&mut info.cell1_rascale, &[FG_CELL1_RASCALE]);
 
-    info.input_current_max = read_int_any(INPUT_CURRENT_MAX_PATHS);
-    info.input_voltage_max = read_int(&format!("{}/voltage_max", PSY_USB));
-    info.fastchg_mode = read_int_any(FASTCHG_MODE_PATHS);
-    info.current_state = read_string(CURRENT_STATE);
-    info.sport_mode = read_int(SPORT_MODE);
-    info.quick_charge_type = read_string_any(QUICK_CHG_TYPE_PATHS);
-    info.pd_verified = read_int_any(PD_VERIFIED_PATHS);
+    update_int_from_paths(&mut info.input_current_max, INPUT_CURRENT_MAX_PATHS);
+    update_int_from_paths(
+        &mut info.input_voltage_max,
+        &[&format!("{}/voltage_max", PSY_USB)],
+    );
+    update_int_from_paths(&mut info.fastchg_mode, FASTCHG_MODE_PATHS);
+    update_non_empty_string_from_paths(&mut info.current_state, &[CURRENT_STATE]);
+    update_int_from_paths(&mut info.sport_mode, &[SPORT_MODE]);
+    update_non_empty_string_from_paths(&mut info.quick_charge_type, QUICK_CHG_TYPE_PATHS);
+    update_int_from_paths(&mut info.pd_verified, PD_VERIFIED_PATHS);
     if should_cancel() {
         return false;
     }
 
-    info.cp_online = read_int_any(CP_ONLINE_PATHS);
-    info.cp_status = read_string(&format!("{}/status", PSY_CP));
-    info.cp_master_iin = read_int(CP_MASTER_IIN);
-    info.cp_slave_iin = read_int(CP_SLAVE_IIN);
+    update_int_from_paths(&mut info.cp_online, CP_ONLINE_PATHS);
+    update_non_empty_string_from_paths(&mut info.cp_status, &[&format!("{}/status", PSY_CP)]);
+    update_int_from_paths(&mut info.cp_master_iin, &[CP_MASTER_IIN]);
+    update_int_from_paths(&mut info.cp_slave_iin, &[CP_SLAVE_IIN]);
 
+    // A failed read must become 0. `estimate_remaining_time_seconds` returns a
+    // positive cached value unchanged, so preserving the last node reading
+    // would freeze the estimate after the node disappears.
     info.remaining_time = read_int_any(REMAINING_TIME_PATHS);
-    info.restrict_chg = read_int(RESTRICT_CHG);
-    info.input_suspend = read_int_any(INPUT_SUSPEND_PATHS);
-    info.smart_chg = read_int(SMART_CHG);
-    info.night_charging = read_int(NIGHT_CHARGING);
-    info.smart_batt = read_int(SMART_BATT);
+    update_int_from_paths(&mut info.restrict_chg, &[RESTRICT_CHG]);
+    update_int_from_paths(&mut info.input_suspend, INPUT_SUSPEND_PATHS);
+    update_int_from_paths(&mut info.smart_chg, &[SMART_CHG]);
+    update_int_from_paths(&mut info.night_charging, &[NIGHT_CHARGING]);
+    update_int_from_paths(&mut info.smart_batt, &[SMART_BATT]);
     if should_cancel() {
         return false;
     }
 
-    info.die_temperature = read_int(DIE_TEMPERATURE);
-    info.slave_die_temperature = read_int(SLAVE_DIE_TEMPERATURE);
-    info.thermal_board_temp = read_int(THERMAL_BOARD_TEMP);
+    update_int_from_paths(&mut info.die_temperature, &[DIE_TEMPERATURE]);
+    update_int_from_paths(&mut info.slave_die_temperature, &[SLAVE_DIE_TEMPERATURE]);
+    update_int_from_paths(&mut info.thermal_board_temp, &[THERMAL_BOARD_TEMP]);
 
-    info.batt_sn = read_string_any(BATT_SN_PATHS);
+    update_non_empty_string_from_paths(&mut info.batt_sn, BATT_SN_PATHS);
+    // This backend has no OPPO auth node. Keep reporting a genuine battery so
+    // ColorOS does not flag every Xiaomi pack. The HAL backends overwrite
+    // this with the vendor node on their own refresh path.
     info.authentic = 1;
-    info.batt_cont_online = read_int(BATT_CONT_ONLINE);
-    info.max_life_temp = read_int(MAX_LIFE_TEMP);
-    info.max_life_vol = read_int(MAX_LIFE_VOL);
-    info.over_vol_duration = read_int(OVER_VOL_DURATION);
-    info.moisture_detected = read_int(MOISTURE_STATUS) != 0;
+    update_int_from_paths(&mut info.batt_cont_online, &[BATT_CONT_ONLINE]);
+    update_int_from_paths(&mut info.max_life_temp, &[MAX_LIFE_TEMP]);
+    update_int_from_paths(&mut info.max_life_vol, &[MAX_LIFE_VOL]);
+    update_int_from_paths(&mut info.over_vol_duration, &[OVER_VOL_DURATION]);
+    update_bool_from_path(&mut info.moisture_detected, MOISTURE_STATUS);
     if should_cancel() {
         return false;
     }
 
-    info.flash_active = read_int(FLASH_ACTIVE) != 0;
-    info.hifi_connect = read_int(HIFI_CONNECT) != 0;
-    info.vbus_disable = read_int(VBUS_DISABLE) != 0;
-    info.otg_ui_support = read_int(OTG_UI_SUPPORT);
+    update_bool_from_path(&mut info.flash_active, FLASH_ACTIVE);
+    update_bool_from_path(&mut info.hifi_connect, HIFI_CONNECT);
+    update_bool_from_path(&mut info.vbus_disable, VBUS_DISABLE);
+    update_int_from_paths(&mut info.otg_ui_support, &[OTG_UI_SUPPORT]);
 
-    info.fake_soc = read_int(FAKE_SOC);
-    info.fake_soh = read_int(FAKE_SOH);
-    info.fake_cycle = read_int(FAKE_CYCLE);
-    info.fake_temp = read_int(FAKE_TEMP);
+    update_int_from_paths(&mut info.fake_soc, &[FAKE_SOC]);
+    update_int_from_paths(&mut info.fake_soh, &[FAKE_SOH]);
+    update_int_from_paths(&mut info.fake_cycle, &[FAKE_CYCLE]);
+    update_int_from_paths(&mut info.fake_temp, &[FAKE_TEMP]);
 
-    info.pc_port_online = read_int_any(PC_PORT_ONLINE_PATHS);
+    update_int_from_paths(&mut info.pc_port_online, PC_PORT_ONLINE_PATHS);
     if should_cancel() {
         return false;
     }
@@ -686,11 +751,14 @@ pub(crate) fn classify_fast_charge_values(inputs: FastChargeInputs<'_>) -> i32 {
     if usb_type.contains("sdp") || usb_type.contains("cdp") {
         return 0;
     }
+    // `online` was already handled above. Folding it into this branch made
+    // every attached source — including a 0 W read — report fast-charge
+    // type 1, so the power thresholds below never applied.
     if adapter_power_w > 20 {
         3
     } else if adapter_power_w > 10 {
         2
-    } else if adapter_power_w > 3 || online {
+    } else if adapter_power_w > 3 {
         1
     } else {
         0
@@ -996,7 +1064,7 @@ pub fn power_source_probe_changed(snapshot: &FastChargeSnapshot) -> bool {
         snapshot,
         try_read_int(&usb_online_path),
         try_read_int(&ac_online_path),
-        try_read_int_any(&[&wireless_online_path, &dc_online_path]),
+        try_read_online_any(&[&wireless_online_path, &dc_online_path]),
         try_read_int_any(PC_PORT_ONLINE_PATHS),
         (!quick_charge_type.is_empty()).then_some(quick_charge_type.as_str()),
         (!usb_type.is_empty()).then_some(usb_type.as_str()),
@@ -1005,10 +1073,13 @@ pub fn power_source_probe_changed(snapshot: &FastChargeSnapshot) -> bool {
 
 // ── Charge control ──
 
-/// Write the charge-control limit nodes.
+/// Restrict or release charging.
 ///
-/// Restricting writes `charge_control_limit_max - 1` (or the fallback when the
-/// node is missing) and raises the cool-mode switches; releasing writes `0`.
+/// Writes the standard `charge_control_limit` node (`max - 1`, or the
+/// fallback when `charge_control_limit_max` is missing) and the vendor
+/// `input_suspend` node. Releasing writes `0` to both. Cool-mode nodes are
+/// left alone: their value domain is unconfirmed, and writing them on top of
+/// input suspend drives two controls for one request.
 pub fn apply_charge_control_limit(restrict: bool) {
     let restricted_value;
     let value = if restrict {
@@ -1019,8 +1090,10 @@ pub fn apply_charge_control_limit(restrict: bool) {
         CHARGE_CONTROL_LIMIT_RELEASED
     };
     write_string_any(CHARGE_CONTROL_LIMIT_PATHS, value);
-    write_string_any(COOL_MODE_PATHS, if restrict { "1" } else { "0" });
-    write_string_any(COOL_DOWN_PATHS, if restrict { "1" } else { "0" });
+    // `input_suspend` is the restrict switch the vendor generations actually
+    // use. `cool_mode` / `cool_down` are a different control whose value
+    // domain is unconfirmed, so they are not written here.
+    write_string_any(INPUT_SUSPEND_PATHS, if restrict { "1" } else { "0" });
 }
 
 // ── Backend ──
@@ -1423,5 +1496,46 @@ mod tests {
         assert_eq!(restricted_charge_control_value(16), "15");
         assert_eq!(restricted_charge_control_value(2), "1");
         assert_eq!(restricted_charge_control_value(0), "15");
+    }
+
+    #[test]
+    fn slow_or_unknown_power_is_not_reported_as_fast_charge() {
+        assert_eq!(
+            classify_fast_charge_values(fast_inputs("", 0, 0, 0, true)),
+            0
+        );
+        assert_eq!(
+            classify_fast_charge_values(fast_inputs("", 0, 0, 3, true)),
+            0
+        );
+        assert_eq!(
+            classify_fast_charge_values(fast_inputs("", 0, 0, 5, true)),
+            1
+        );
+    }
+
+    #[test]
+    fn failed_real_type_read_does_not_become_a_generic_usb_data_port() {
+        let mut info = ChargerInfo {
+            usb_online: 1,
+            usb_real_type: "USB_PD".into(),
+            usb_type: "USB_PD".into(),
+            ..Default::default()
+        };
+        apply_usb_type_reading(&mut info, "", "USB");
+        assert_eq!(info.usb_real_type, "USB_PD");
+        assert_eq!(info.usb_type, "USB_PD");
+        assert!(!is_data_port(&info));
+
+        apply_usb_type_reading(&mut info, "USB_DCP", "USB");
+        assert_eq!(info.usb_real_type, "USB_DCP");
+        assert!(!is_data_port(&info));
+    }
+
+    #[test]
+    fn online_readings_do_not_let_a_leading_zero_hide_a_later_supply() {
+        assert_eq!(merge_online_readings([None, Some(0), Some(1)]), Some(1));
+        assert_eq!(merge_online_readings([Some(0), None]), Some(0));
+        assert_eq!(merge_online_readings([None, None]), None);
     }
 }

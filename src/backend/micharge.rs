@@ -160,6 +160,56 @@ struct ProbeSnapshot {
     dp_connected: bool,
     quick_charge_type: String,
     power_max: String,
+    usb_online: i32,
+    ac_online: i32,
+    wireless_online: i32,
+}
+
+struct HalProbeSample<'a> {
+    dp_connected: bool,
+    quick_charge_type: &'a str,
+    power_max: &'a str,
+    usb_online: Option<i32>,
+    ac_online: Option<i32>,
+    wireless_online: Option<i32>,
+}
+
+/// Compare one cheap probe against the previous one.
+///
+/// The first sample always counts as a change. An unreadable online node
+/// (`None`) does not: a missing file must not look like the charger was
+/// unplugged and spin the poll loop.
+fn probe_sample_changed(cache: &mut ProbeSnapshot, sample: HalProbeSample<'_>) -> bool {
+    let hal_changed = !cache.initialized
+        || cache.dp_connected != sample.dp_connected
+        || cache.quick_charge_type != sample.quick_charge_type
+        || cache.power_max != sample.power_max;
+    let online_changed = cache.initialized
+        && (sample
+            .usb_online
+            .is_some_and(|value| value != cache.usb_online)
+            || sample
+                .ac_online
+                .is_some_and(|value| value != cache.ac_online)
+            || sample
+                .wireless_online
+                .is_some_and(|value| value != cache.wireless_online));
+    cache.initialized = true;
+    cache.dp_connected = sample.dp_connected;
+    cache.quick_charge_type.clear();
+    cache.quick_charge_type.push_str(sample.quick_charge_type);
+    cache.power_max.clear();
+    cache.power_max.push_str(sample.power_max);
+    if let Some(value) = sample.usb_online {
+        cache.usb_online = value;
+    }
+    if let Some(value) = sample.ac_online {
+        cache.ac_online = value;
+    }
+    if let Some(value) = sample.wireless_online {
+        cache.wireless_online = value;
+    }
+    hal_changed || online_changed
 }
 
 /// Xiaomi MiCharge vendor HAL backend.
@@ -417,7 +467,7 @@ impl ChargeBackend for MiChargeBackend {
             &[&batt_health_path],
         );
         crate::backend::sysfs::update_int_from_paths(&mut info.ac_online, &[&ac_online_path]);
-        crate::backend::sysfs::update_int_from_paths(
+        crate::backend::sysfs::update_online_from_paths(
             &mut info.wireless_online,
             &[&wireless_online_path, &dc_online_path],
         );
@@ -457,6 +507,12 @@ impl ChargeBackend for MiChargeBackend {
         if should_cancel() {
             return false;
         }
+
+        // This path never reads `usb_type`. A previous sysfs scan can leave
+        // the generic value "USB" behind, and the data-port check treats that
+        // as a computer. Drop it so only `pc_port_online` applies here.
+        info.usb_type.clear();
+        info.usb_real_type.clear();
 
         let charger_online =
             info.usb_online != 0 || info.ac_online != 0 || info.wireless_online != 0;
@@ -519,14 +575,12 @@ impl ChargeBackend for MiChargeBackend {
     }
 
     fn power_source_changed(&self) -> bool {
-        // Cheap probe only: three light getters, no full snapshot.
-        //
-        // Capacity is deliberately absent. It drifts upward while charging, so
-        // including it would escalate to a full scan on every percent and turn
-        // a quiet 5-second poll into a steady stream of binder round trips. The
-        // node reader's probe leaves it out for the same reason.
+        // Cheap probe only: three light getters plus the online nodes the HAL
+        // does not expose. Capacity is deliberately absent. It drifts upward
+        // while charging, so including it would escalate to a full scan on
+        // every percent.
         let Some(proxy) = self.proxy() else {
-            return true;
+            return self.fallback.power_source_changed();
         };
         let (Some(dp_connected), Some(quick_charge_type), Some(power_max)) = (
             fetch(&*proxy, |p| p.isDPConnected()),
@@ -539,16 +593,22 @@ impl ChargeBackend for MiChargeBackend {
             return true;
         };
 
-        let current = ProbeSnapshot {
-            initialized: true,
+        let usb_online_path = format!("{}/online", crate::backend::sysfs::PSY_USB);
+        let ac_online_path = format!("{}/online", crate::backend::sysfs::PSY_AC);
+        let wireless_online_path = format!("{}/online", crate::backend::sysfs::PSY_WIRELESS);
+        let dc_online_path = format!("{}/online", crate::backend::sysfs::PSY_DC);
+        let sample = HalProbeSample {
             dp_connected,
-            quick_charge_type,
-            power_max,
+            quick_charge_type: &quick_charge_type,
+            power_max: &power_max,
+            usb_online: crate::backend::sysfs::try_read_int(&usb_online_path),
+            ac_online: crate::backend::sysfs::try_read_int(&ac_online_path),
+            wireless_online: crate::backend::sysfs::try_read_online_any(&[
+                &wireless_online_path,
+                &dc_online_path,
+            ]),
         };
-        let mut cache = self.probe.lock();
-        let changed = !cache.initialized || *cache != current;
-        *cache = current;
-        changed
+        probe_sample_changed(&mut self.probe.lock(), sample)
     }
 }
 
@@ -718,6 +778,42 @@ mod tests {
 
         let cancelled = backend.refresh(&mut info, &|| true);
         assert!(!cancelled);
+    }
+
+    #[test]
+    fn probe_reports_supply_changes_and_ignores_unreadable_nodes() {
+        let mut cache = super::ProbeSnapshot::default();
+        let first = super::HalProbeSample {
+            dp_connected: false,
+            quick_charge_type: "0",
+            power_max: "0",
+            usb_online: Some(0),
+            ac_online: Some(0),
+            wireless_online: Some(0),
+        };
+        assert!(super::probe_sample_changed(&mut cache, first));
+
+        let same = super::HalProbeSample {
+            dp_connected: false,
+            quick_charge_type: "0",
+            power_max: "0",
+            usb_online: None,
+            ac_online: None,
+            wireless_online: None,
+        };
+        assert!(!super::probe_sample_changed(&mut cache, same));
+        assert_eq!(cache.usb_online, 0);
+
+        let wireless = super::HalProbeSample {
+            dp_connected: false,
+            quick_charge_type: "0",
+            power_max: "0",
+            usb_online: Some(0),
+            ac_online: Some(0),
+            wireless_online: Some(1),
+        };
+        assert!(super::probe_sample_changed(&mut cache, wireless));
+        assert_eq!(cache.wireless_online, 1);
     }
 
     #[test]
