@@ -266,6 +266,15 @@ if ! printf '%s\n' "$SYSFS_CTRL" | rg -q 'NIGHT_CHARGING'; then
     fail "apply_charge_control_limit no longer drives the no-charge gate; the current limit alone still charges the pack"
 fi
 
+MICHARGE_CTRL="$(sed -n '/fn set_charge_control/,/^    }/p' "$MICHARGE")"
+[ -n "$MICHARGE_CTRL" ] || fail "micharge set_charge_control not found; the assertion went stale"
+if printf '%s\n' "$MICHARGE_CTRL" | rg 'setInputSuspendState'; then
+    fail "micharge charge control suspends the input: the charger drops offline and bypass charging is closed"
+fi
+if ! printf '%s\n' "$MICHARGE_CTRL" | rg -q 'setNightChargingState'; then
+    fail "micharge charge control no longer uses the vendor no-charge gate"
+fi
+
 # ── Hardware bypass stays with the HAL ──
 #
 # A backend whose HAL implements bypass must not also run the adapter's

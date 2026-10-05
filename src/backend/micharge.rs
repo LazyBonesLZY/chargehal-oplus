@@ -115,7 +115,7 @@ use rsbinder::{hub, DeathRecipient, StatusCode, Strong, WIBinder};
 use crate::adapter::ChargerInfo;
 use crate::vendor::xiaomi::hardware::micharge::IMiCharge::IMiCharge as MiCharge;
 
-use super::sysfs::SysfsBackend;
+use super::sysfs::{apply_charge_control_limit, SysfsBackend};
 use super::ChargeBackend;
 
 /// Service instance registered by the Xiaomi vendor HAL.
@@ -537,40 +537,30 @@ impl ChargeBackend for MiChargeBackend {
     }
 
     fn set_charge_control(&self, restrict: bool) {
-        let Some(proxy) = self.proxy() else {
-            tracing::warn!("MiCharge HAL unavailable; falling back to sysfs charge control");
-            self.fallback.set_charge_control(restrict);
-            return;
-        };
         let value = if restrict { "1" } else { "0" };
-        // Input suspend is the only working restrict switch on the AIDL V2
-        // generation. The vendor HAL prepends "micharge all " and writes
-        // xm_power/charger/charge_interface/input_suspend.
-        //
-        // setCoolModeState is deliberately not called: disassembly shows it
-        // shares its address with the getter (0x25aa4), is 11 instructions long
-        // and only logs "not support coolMode", returning 0 without touching any
-        // node. Calling it would cost a binder round trip and nothing else.
-        match fetch(&*proxy, |p| p.setInputSuspendState(value)) {
-            Some(0) => {}
-            Some(status) => {
-                // The status comes back from the HAL's own node write, so the
-                // call did reach the HAL and it reported the write failing.
-                // Falling back to sysfs here would apply a *different* mechanism
-                // (threshold-based) for the same intent while the HAL path may
-                // have partially applied. Until the non-zero semantics are
-                // confirmed on a device, warn only.
-                tracing::warn!("MiCharge setInputSuspendState({value}) returned {status}");
+        // The vendor's no-charge gate, not `setInputSuspendState`. That one
+        // writes `xm_power/charger/charge_interface/input_suspend` and suspends
+        // the input, which takes the charger offline; the framework then closes
+        // bypass charging right after it opens. The gate writes
+        // `xm_power/charger/smart_charge/smart_night` and holds the pack current
+        // at zero while the charger stays online — the same control the HIDL
+        // generation reaches through `battery/night_charging`.
+        if let Some(proxy) = self.proxy() {
+            match fetch(&*proxy, |p| p.setNightChargingState(value)) {
+                Some(0) => return,
+                Some(status) => {
+                    tracing::warn!("MiCharge setNightChargingState({value}) returned {status}");
+                }
+                None => {
+                    tracing::warn!(
+                        "MiCharge setNightChargingState({value}) failed; trying sysfs fallback"
+                    );
+                }
             }
-            None => {
-                // Transport failure: the call never reached the HAL, so the
-                // node path is the only way to honour the request.
-                tracing::warn!(
-                    "MiCharge setInputSuspendState({value}) failed; trying sysfs fallback"
-                );
-                self.fallback.set_charge_control(restrict);
-            }
+        } else {
+            tracing::warn!("MiCharge HAL unavailable; falling back to sysfs charge control");
         }
+        apply_charge_control_limit(restrict);
     }
 
     fn power_source_changed(&self) -> bool {
