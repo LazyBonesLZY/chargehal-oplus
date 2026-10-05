@@ -245,6 +245,36 @@ if printf '%s\n' "$DECIMAL_BODY" | rg 'read_|write_|sleep|request_refresh|thread
     fail "I/O or scheduling work found in get_decimal_soc"
 fi
 
+# ── Charge control: current limit, never input suspend ──
+#
+# Writing `input_suspend` drops the charger offline for as long as the value
+# sticks, and the framework closes bypass charging the moment it stops seeing a
+# charger. Both node-driven paths must limit the current instead.
+
+HIDL_CTRL="$(sed -n '/fn set_charge_control/,/^    }/p' "$ROOT/src/backend/hidl.rs")"
+[ -n "$HIDL_CTRL" ] || fail "hidl set_charge_control not found; the charge-control assertion went stale"
+if printf '%s\n' "$HIDL_CTRL" | rg 'INPUT_SUSPEND'; then
+    fail "hidl charge control writes input_suspend: the charger drops offline and bypass charging is closed"
+fi
+
+SYSFS_CTRL="$(sed -n '/pub fn apply_charge_control_limit/,/^}/p' "$SYSFS")"
+[ -n "$SYSFS_CTRL" ] || fail "apply_charge_control_limit not found; the charge-control assertion went stale"
+if printf '%s\n' "$SYSFS_CTRL" | rg 'INPUT_SUSPEND'; then
+    fail "apply_charge_control_limit writes input_suspend: the charger drops offline and bypass charging is closed"
+fi
+
+# ── Hardware bypass stays with the HAL ──
+#
+# A backend whose HAL implements bypass must not also run the adapter's
+# node-level stand-in: on Lenovo that would suspend the input through
+# `setUsbSupplyDisabled` and the charger would drop offline.
+
+LENOVO_BYPASS="$(sed -n '/fn has_hardware_bypass/,/^    }/p' "$ROOT/src/backend/lenovo.rs")"
+[ -n "$LENOVO_BYPASS" ] || fail "lenovo has_hardware_bypass not found; the assertion went stale"
+if ! printf '%s\n' "$LENOVO_BYPASS" | rg -q 'true'; then
+    fail "lenovo no longer reports a hardware bypass: the adapter would run its stand-in on top of setBypassLevel"
+fi
+
 # ── Kernel paths ──
 
 if rg -n '/(sys|proc)/[^" ]*(oplus|oppo)|/proc/wireless' "$ROOT/src"; then

@@ -523,6 +523,11 @@ pub struct Adapter {
     pub chg_up_limit_value: Mutex<String>,
     pub charge_limit_active: Mutex<bool>,
     pub bypass_charge_status: Mutex<String>,
+    /// Pack level latched when bypass charging was switched on, and the
+    /// hysteresis latch driven from it. Bypass holds the pack where it was
+    /// instead of suspending the input, which the framework reads as a fault.
+    bypass_hold_soc: Mutex<Option<i32>>,
+    bypass_latch: Mutex<bool>,
     pub charge_control_active: Mutex<bool>,
     charge_control_update_lock: Mutex<()>,
     charge_control_applied: Mutex<Option<bool>>,
@@ -575,6 +580,8 @@ impl Adapter {
             chg_up_limit_value: Mutex::new("90".into()),
             charge_limit_active: Mutex::new(false),
             bypass_charge_status: Mutex::new("0".into()),
+            bypass_hold_soc: Mutex::new(None),
+            bypass_latch: Mutex::new(false),
             charge_control_active: Mutex::new(false),
             charge_control_update_lock: Mutex::new(()),
             charge_control_applied: Mutex::new(Some(false)),
@@ -782,8 +789,26 @@ impl Adapter {
         }
     }
 
+    /// Whether the stand-in for bypass should hold the pack back: the pack is at
+    /// or above the level bypass latched when it was switched on, with the same
+    /// hysteresis as the charge limit. Only used on backends without a hardware
+    /// bypass mode, where it is the closest the device gets to the real thing.
     fn bypass_should_restrict(&self) -> bool {
-        Self::parse_bypass_switch(&self.bypass_charge_status.lock())
+        if self.backend.has_hardware_bypass() {
+            return false;
+        }
+        if !Self::parse_bypass_switch(&self.bypass_charge_status.lock()) {
+            return false;
+        }
+        let target = *self.bypass_hold_soc.lock();
+        let next = Self::charge_limit_latch_state(
+            *self.bypass_latch.lock(),
+            true,
+            self.info.lock().battery_capacity,
+            target,
+        );
+        *self.bypass_latch.lock() = next;
+        next
     }
 
     fn charge_limit_switch_enabled(&self) -> bool {
@@ -823,6 +848,18 @@ impl Adapter {
         );
         *self.charge_limit_active.lock() = next_active;
         next_active
+    }
+
+    /// Clear any bypass latch and tell the vendor HAL to stop bypassing.
+    fn release_bypass(&self) {
+        if !Self::parse_bypass_switch(&self.bypass_charge_status.lock()) {
+            return;
+        }
+        *self.bypass_charge_status.lock() = "0".into();
+        *self.bypass_hold_soc.lock() = None;
+        *self.bypass_latch.lock() = false;
+        self.backend.set_bypass_charge(false);
+        write_string_any(BYPASS_STATUS_PATHS, "0");
     }
 
     fn desired_charge_control_active(&self) -> bool {
@@ -1392,6 +1429,9 @@ impl Adapter {
         if let Some(percent) = parse_first_int(&self.chg_up_limit_value.lock().clone())
             .filter(|value| (1..=100).contains(value))
         {
+            if percent >= 100 {
+                self.release_bypass();
+            }
             self.backend.set_charge_limit(Some(percent));
         }
         if stop_charging != 0 {
@@ -1422,6 +1462,10 @@ impl Adapter {
         }
         if enabled == 0 {
             *self.charge_limit_active.lock() = false;
+            // Turning the limit off is a charge re-enable: drop bypass with it,
+            // otherwise its latch keeps the input suspended and charging never
+            // comes back.
+            self.release_bypass();
         } else {
             self.update_charge_limit_latch();
         }
@@ -1455,6 +1499,12 @@ impl Adapter {
         *self.charge_control_applied.lock() = None;
         let enabled = Self::parse_bypass_switch(value);
         let normalized = if enabled { "1" } else { "0" };
+        if enabled {
+            *self.bypass_hold_soc.lock() = Some(self.info.lock().battery_capacity);
+        } else {
+            *self.bypass_hold_soc.lock() = None;
+            *self.bypass_latch.lock() = false;
+        }
         *self.bypass_charge_status.lock() = normalized.into();
         self.backend.set_bypass_charge(enabled);
         self.set_charge_control_active(self.desired_charge_control_active());

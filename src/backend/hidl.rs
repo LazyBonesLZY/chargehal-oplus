@@ -58,21 +58,14 @@
 //!
 //! # Control path
 //!
-//! Charge restriction writes the branch `input_suspend` node with `"1"` / `"0"`
-//! verbatim. Two things are worth stating plainly rather than implying:
-//!
-//! * The `"1"` / `"0"` value domain is inherited, not proven. `input_suspend` is
-//!   a vendor-private attribute (absent from the upstream `power_supply` ABI),
-//!   so its accepted values are unconfirmed. The AIDL path hands the same pair
-//!   to the vendor setter; this backend matches that behaviour instead of
-//!   inventing a different encoding.
-//! * No `"micharge all "` prefix is added: that prefix is evidenced only on the
-//!   AIDL generation's setter, and adding it here would corrupt the node this
-//!   generation parses.
+//! Charge restriction is a current limit on `charge_control_limit`, the same
+//! control the AIDL path uses. The branch `input_suspend` node is read but never
+//! written: suspending the input takes the charger offline, and the framework
+//! closes bypass charging as soon as it stops seeing a charger.
 //!
 //! `setCoolModeState` is deliberately not used even though this generation
 //! implements it (unlike the AIDL generation, where it is an empty shell): its
-//! value domain is equally unconfirmed, and `input_suspend` already carries the
+//! value domain is unconfirmed, and the current limit already carries the
 //! adapter's restrict/release intent. Driving two unconfirmed encodings for one
 //! intent would double the ways a device can reach an unexpected state.
 
@@ -377,12 +370,10 @@ impl ChargeBackend for HidlBackend {
     }
 
     fn set_charge_control(&self, restrict: bool) {
-        // Mirrors the vendor setter's target node: the branch `input_suspend`
-        // node, written verbatim with "1" / "0". No prefix: the only evidenced
-        // prefix belongs to the AIDL generation. The value domain itself is an
-        // inherited assumption, not a proven one — see the module docs.
-        let value = if restrict { "1" } else { "0" };
-        sysfs::write_string_any(&[INPUT_SUSPEND[self.branch()]], value);
+        // A current limit on the shared node, not the branch `input_suspend`
+        // write this backend used to do: suspending the input takes the charger
+        // offline and the framework then closes bypass charging.
+        sysfs::apply_charge_control_limit(restrict);
     }
 
     fn power_source_changed(&self) -> bool {

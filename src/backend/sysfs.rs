@@ -1077,11 +1077,16 @@ pub fn power_source_probe_changed(snapshot: &FastChargeSnapshot) -> bool {
 
 /// Restrict or release charging.
 ///
-/// Writes the standard `charge_control_limit` node (`max - 1`, or the
-/// fallback when `charge_control_limit_max` is missing) and the vendor
-/// `input_suspend` node. Releasing writes `0` to both. Cool-mode nodes are
-/// left alone: their value domain is unconfirmed, and writing them on top of
-/// input suspend drives two controls for one request.
+/// Writes the standard `charge_control_limit` node (`max - 1`, or the fallback
+/// when `charge_control_limit_max` is missing); releasing writes `0`. The node
+/// is a current limit: `max - 1` holds the pack back while the charger stays
+/// online and the battery keeps reporting `Charging`.
+///
+/// The vendor `input_suspend` node is deliberately not written. Suspending the
+/// input takes the charger offline, and the framework closes bypass charging as
+/// soon as it stops seeing a charger, which is the failure this control exists
+/// to avoid. Cool-mode nodes are left alone: their value domain is unconfirmed,
+/// and writing them would drive two controls for one request.
 pub fn apply_charge_control_limit(restrict: bool) {
     let restricted_value;
     let value = if restrict {
@@ -1092,10 +1097,6 @@ pub fn apply_charge_control_limit(restrict: bool) {
         CHARGE_CONTROL_LIMIT_RELEASED
     };
     write_string_any(CHARGE_CONTROL_LIMIT_PATHS, value);
-    // `input_suspend` is the restrict switch the vendor generations actually
-    // use. `cool_mode` / `cool_down` are a different control whose value
-    // domain is unconfirmed, so they are not written here.
-    write_string_any(INPUT_SUSPEND_PATHS, if restrict { "1" } else { "0" });
 }
 
 // ── Backend ──

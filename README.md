@@ -129,6 +129,11 @@ REQUIRE_CHARGING=1 MAX_WAKE_MS=1000 ./tools/validate-device.sh 10
   contract names and its scale is unconfirmed.
 - Data-port protection on the AIDL path relies on `pc_port_online` alone
   (`usb_type`'s domain is unverified); the HIDL path uses its own `has_dp`.
+- Bypass charging on hardware without a bypass mode is a current limit: the pack
+  is held back through `charge_control_limit` while the charger stays online.
+  `input_suspend` is never written — it takes the charger offline, and the
+  framework then closes bypass charging right after it opens. A backend whose
+  HAL implements bypass (Lenovo) drives its own control instead.
 
 ## License
 

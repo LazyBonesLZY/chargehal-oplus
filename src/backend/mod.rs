@@ -74,6 +74,16 @@ pub trait ChargeBackend: Send + Sync {
         None
     }
 
+    /// Whether the vendor HAL implements bypass charging itself.
+    ///
+    /// When it does, the adapter must not also run the node-level current limit
+    /// that stands in for bypass on hardware without one: that limit suspends
+    /// the input on some generations, which takes the charger offline and makes
+    /// the framework close bypass charging right after it opens.
+    fn has_hardware_bypass(&self) -> bool {
+        false
+    }
+
     /// Cheap power-source probe, used to decide whether a power-supply uevent
     /// has to escalate to a full scan.
     ///

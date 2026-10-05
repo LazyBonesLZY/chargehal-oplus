@@ -419,6 +419,13 @@ impl ChargeBackend for LenovoBackend {
         fetch(&*proxy, |p| p.getBypassLevel()).map(|level| level != 0)
     }
 
+    fn has_hardware_bypass(&self) -> bool {
+        // `setBypassLevel` is the HAL's own bypass control. The adapter's
+        // stand-in must stay off here, or `setUsbSupplyDisabled` would suspend
+        // the input alongside it and the charger would drop offline.
+        true
+    }
+
     fn power_source_changed(&self) -> bool {
         // Cheap probe only. Capacity is deliberately absent: it drifts upward
         // while charging and would escalate to a full scan every percent.
