@@ -37,20 +37,43 @@
 //!   / `pd_verifed`, `fastcharge_mode` / `fastchg_mode`, `soh`, `input_suspend`,
 //!   `night_charging`, `smart_batt`, `soc_decimal`(+`_rate`), car-adapter type,
 //!   `power_max`.
+//! * Data-port detection uses this generation's own signal: `has_dp` — the node
+//!   `isDPConnected` reads — feeds `pc_port_online`, and `real_type` feeds the
+//!   USB-type check. `usb_type` itself is not read because that node exists on
+//!   neither generation.
 //! * Deliberately NOT mapped: anything reading the reverse-charge mode node is
 //!   never written into `wireless_online` (same trap as the AIDL backend: an
-//!   active reverse-charge session would pose as incoming wireless power);
-//!   `usb_type` is not read either, so data-port detection rests on
-//!   `real_type` plus `pc_port_online`.
+//!   active reverse-charge session would pose as incoming wireless power).
+//! * Not mapped because `ChargerInfo` has no destination for them — not because
+//!   they are missing on this generation: `getBatteryResistance` (cell
+//!   resistance), `getBatteryThermaLevel` (charge-control limit level),
+//!   `getPdApdoMax` (PDO/APDO index, not a wattage), `getPSValue` (reverse-pen
+//!   SOC), `getBtTransferStartState`, `getTxAdapt`, `getWirelessFwStatus`,
+//!   `getCoolModeState`, `isUSB32`, and the key/value accessors
+//!   (`getMiChargePath`, `isFunctionSupported`, `setMiChargePath`). Each has a
+//!   node in this generation's set; none has a field here.
 //! * `soc_decimal` / `soc_decimal_rate` are collected but not served, for the
 //!   same scale reason documented on the AIDL path.
 //!
 //! # Control path
 //!
 //! Charge restriction writes the branch `input_suspend` node with `"1"` / `"0"`
-//! verbatim. No `"micharge all "` prefix is added: that prefix is evidenced
-//! only on the AIDL generation's setter, and inventing it here would corrupt
-//! the node this generation actually parses.
+//! verbatim. Two things are worth stating plainly rather than implying:
+//!
+//! * The `"1"` / `"0"` value domain is inherited, not proven. `input_suspend` is
+//!   a vendor-private attribute (absent from the upstream `power_supply` ABI),
+//!   so its accepted values are unconfirmed. The AIDL path hands the same pair
+//!   to the vendor setter; this backend matches that behaviour instead of
+//!   inventing a different encoding.
+//! * No `"micharge all "` prefix is added: that prefix is evidenced only on the
+//!   AIDL generation's setter, and adding it here would corrupt the node this
+//!   generation parses.
+//!
+//! `setCoolModeState` is deliberately not used even though this generation
+//! implements it (unlike the AIDL generation, where it is an empty shell): its
+//! value domain is equally unconfirmed, and `input_suspend` already carries the
+//! adapter's restrict/release intent. Driving two unconfirmed encodings for one
+//! intent would double the ways a device can reach an unexpected state.
 
 use parking_lot::Mutex;
 
@@ -144,6 +167,18 @@ const POWER_MAX: [&str; 2] = [
 const USB_CURRENT: [&str; 2] = [
     "/sys/class/power_supply/usb/input_current_now",
     "/sys/class/power_supply/usb/current_now",
+];
+// Data-port signal. This generation has **no** `pc_port_online` node anywhere
+// in its node set (HAL-NODES 222 table, 63 entries): its `isDPConnected` reads
+// the DP-alt-mode flag instead. That flag is therefore what has to feed the
+// adapter's data-port check — probing `pc_port_online` here would always fail
+// and silently disable data-port suppression on this generation.
+const HAS_DP: [&str; 2] = [
+    // A grade. The vendor literal is missing its leading '/'; repaired here so
+    // the read does not depend on the process working directory.
+    "/sys/class/power_supply/usb/has_dp",
+    // C grade, private qcom class.
+    "/sys/class/qcom-battery/has_dp",
 ];
 
 /// Whether a vendor manifest fragment exists. Plain file probe, no parsing —
@@ -269,7 +304,10 @@ impl ChargeBackend for HidlBackend {
             &mut info.battery_health,
             &[&format!("{PSY_BATTERY}/health")],
         );
-        sysfs::update_int_from_paths(&mut info.pc_port_online, sysfs::PC_PORT_ONLINE_PATHS);
+        // Data-port signal comes from `has_dp`, not `pc_port_online`: see the
+        // constant's note. Both fields the adapter's data-port check reads are
+        // therefore populated from this generation's own evidence.
+        sysfs::update_int_from_paths(&mut info.pc_port_online, &[HAS_DP[b]]);
         if should_cancel() {
             return false;
         }
@@ -344,7 +382,8 @@ impl ChargeBackend for HidlBackend {
     fn set_charge_control(&self, restrict: bool) {
         // Mirrors the vendor setter's target node: the branch `input_suspend`
         // node, written verbatim with "1" / "0". No prefix: the only evidenced
-        // prefix belongs to the AIDL generation.
+        // prefix belongs to the AIDL generation. The value domain itself is an
+        // inherited assumption, not a proven one — see the module docs.
         let value = if restrict { "1" } else { "0" };
         sysfs::write_string_any(&[INPUT_SUSPEND[self.branch()]], value);
     }
@@ -356,14 +395,17 @@ impl ChargeBackend for HidlBackend {
         let ac_online_path = format!("{PSY_AC}/online");
         let wireless_online_path = format!("{PSY_WIRELESS}/online");
         let dc_online_path = format!("{PSY_DC}/online");
-        let quick_charge_type = sysfs::read_string_any(&[QUICK_CHARGE_TYPE[self.branch()]]);
-        let real_type = sysfs::read_string_any(&[REAL_TYPE[self.branch()]]);
+        // Must read the same nodes `refresh` fills, or a change this probe
+        // cannot see would never escalate to a full scan.
+        let b = self.branch();
+        let quick_charge_type = sysfs::read_string_any(&[QUICK_CHARGE_TYPE[b]]);
+        let real_type = sysfs::read_string_any(&[REAL_TYPE[b]]);
         sysfs::power_source_probe_values_changed(
             &self.last_probe.lock(),
             sysfs::try_read_int(&usb_online_path),
             sysfs::try_read_int(&ac_online_path),
             sysfs::try_read_int_any(&[&wireless_online_path, &dc_online_path]),
-            sysfs::try_read_int_any(sysfs::PC_PORT_ONLINE_PATHS),
+            sysfs::try_read_int(HAS_DP[b]),
             (!quick_charge_type.is_empty()).then_some(quick_charge_type.as_str()),
             (!real_type.is_empty()).then_some(real_type.as_str()),
         )
@@ -372,7 +414,7 @@ impl ChargeBackend for HidlBackend {
 
 #[cfg(test)]
 mod tests {
-    use super::{qcom_branch_for_platform, HidlBackend};
+    use super::*;
     use crate::adapter::ChargerInfo;
     use crate::backend::ChargeBackend;
 
@@ -407,5 +449,58 @@ mod tests {
         let _ = backend.power_source_changed();
         backend.set_charge_control(true);
         backend.set_charge_control(false);
+    }
+
+    #[test]
+    fn every_node_path_is_absolute() {
+        // The vendor binaries contain six path literals that are missing their
+        // leading '/' (HAL-NODES §5.4): they only resolve because the vendor
+        // service runs with cwd=/. Copying one of those literals verbatim would
+        // silently make a read depend on our working directory, which is the
+        // one class of bug in this file a host test can actually catch.
+        let dual: [&[&str]; 15] = [
+            &AUTHENTIC,
+            &REAL_TYPE,
+            &QUICK_CHARGE_TYPE,
+            &PD_VERIFIED,
+            &FASTCHG_MODE,
+            &SOH,
+            &INPUT_SUSPEND,
+            &NIGHT_CHARGING,
+            &SMART_BATT,
+            &SOC_DECIMAL,
+            &SOC_DECIMAL_RATE,
+            &CAR_ADAPTER,
+            &POWER_MAX,
+            &USB_CURRENT,
+            &HAS_DP,
+        ];
+        for table in dual {
+            for path in table {
+                assert!(path.starts_with('/'), "not absolute: {path}");
+            }
+        }
+        let unique: [&str; 7] = [
+            CAPACITY,
+            CHARGE_FULL,
+            CYCLE_COUNT,
+            IBAT,
+            TBAT,
+            VBAT,
+            USB_VOLTAGE,
+        ];
+        for path in unique {
+            assert!(path.starts_with('/'), "not absolute: {path}");
+        }
+    }
+
+    #[test]
+    fn data_port_signal_comes_from_has_dp_not_pc_port_online() {
+        // This generation's node set has no `pc_port_online` at all; the
+        // data-port signal is `has_dp`. Pin the branch order so a future edit
+        // cannot silently swap the two families.
+        assert_eq!(HAS_DP[0], "/sys/class/power_supply/usb/has_dp");
+        assert_eq!(HAS_DP[1], "/sys/class/qcom-battery/has_dp");
+        assert!(!HAS_DP.iter().any(|p| p.contains("pc_port_online")));
     }
 }

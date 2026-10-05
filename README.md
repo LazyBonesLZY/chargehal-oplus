@@ -189,9 +189,12 @@ latency. Do not run it on a primary device.
   not the one the official contract names, and its scale (×100 vs ×1000) is
   unconfirmed, so it is surfaced only through the SOH debug interface until a
   device reading settles it.
-- **USB data-port protection is incomplete on the bridge path.** The node that
+- **USB data-port protection is incomplete on the AIDL path.** The node that
   could carry `usb_type` has an unverified value domain, and reading it wrong
-  would classify every charger as a data port; only `pc_port_online` is used.
+  would classify every charger as a data port; that path therefore relies on
+  `pc_port_online` alone. The HIDL-generation path is better off: it reads that
+  generation's own `has_dp` signal, which is the node its `isDPConnected`
+  probes.
 - Charging node names, units, permissions, and control behavior vary by kernel.
 - Some OPlus methods are stubs because the target Xiaomi kernel lacks the corresponding hardware.
 - Authentication and short-circuit health values include target-specific compatibility behavior.
