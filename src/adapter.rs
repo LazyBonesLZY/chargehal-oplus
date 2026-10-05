@@ -165,6 +165,9 @@ fn monitor_power_supply_uevents(adapter: Weak<Adapter>) -> io::Result<()> {
 // ── sysfs paths ──
 
 const SHORT_CIRCUIT_HEALTHY: i32 = 1;
+
+/// See [`ChargerInfo::authentic`].
+pub const AUTHENTIC_REPORTED: i32 = 1;
 const CHARGE_STOP_THRESHOLD_PATHS: &[&str] = &[
     "/sys/class/power_supply/battery/charge_limit",
     "/sys/class/qcom-battery/charge_limit",
@@ -229,6 +232,9 @@ pub struct ChargerInfo {
     pub pc_port_online: i32,
     pub wireless_online: i32,
     pub wireless_type: String,
+    /// Wireless rail voltage (grade A, µV) and current (grade A, µA).
+    pub wireless_voltage_now: i32,
+    pub wireless_current_now: i32,
     pub typec_mode: String,
     pub cc_orientation: i32,
     pub battery_present: bool,
@@ -295,6 +301,9 @@ pub struct ChargerInfo {
     pub slave_die_temperature: i32,
     pub thermal_board_temp: i32,
     pub batt_sn: String,
+    /// Reported to ColorOS as authentic. The contract asks whether the pack is
+    /// an *OPlus* original, which no bridged device can answer, and 0 makes
+    /// ColorOS warn about a non-genuine battery. Fixed by policy.
     pub authentic: i32,
     pub batt_cont_online: i32,
     pub max_life_temp: i32,
@@ -404,6 +413,8 @@ impl Default for ChargerInfo {
             pc_port_online: 0,
             wireless_online: 0,
             wireless_type: String::new(),
+            wireless_voltage_now: 0,
+            wireless_current_now: 0,
             typec_mode: String::new(),
             cc_orientation: 0,
             battery_present: true,
@@ -463,7 +474,7 @@ impl Default for ChargerInfo {
             slave_die_temperature: 0,
             thermal_board_temp: 0,
             batt_sn: String::new(),
-            authentic: 1,
+            authentic: AUTHENTIC_REPORTED,
             batt_cont_online: 0,
             max_life_temp: 0,
             max_life_vol: 0,
@@ -1090,6 +1101,8 @@ impl Adapter {
                 "wireless_rx_version={}\n",
                 "wireless_tx_version={}\n",
                 "wireless_idt_adc_test={}\n",
+                // Both are literals in the official binary too (format strings
+                // 0x15712 / 0x8be1 carry no conversion), so keep them fixed.
                 "wireless_enable_tx=4\n",
                 "battery_status=1\n",
                 "wireless_voltage_now={}\n",
@@ -1137,10 +1150,10 @@ impl Adapter {
             charge_tech,
             0,
             0,
-            "",
+            info.wireless_current_now,
             "",
             0,
-            "",
+            info.wireless_voltage_now.to_string(),
             "",
             0,
             "",
@@ -1356,11 +1369,17 @@ impl Adapter {
         self.get_stable_adapter_power_w()
     }
     pub fn get_charge_limit_value(&self) -> String {
+        if let Some(percent) = self.backend.charge_limit_percent() {
+            return percent.to_string();
+        }
         self.chg_up_limit_value.lock().clone()
     }
     pub fn set_charge_limit_value(&self, value: &str) {
         let _update_guard = self.charge_control_update_lock.lock();
         *self.charge_control_applied.lock() = None;
+        // `recharge` is parsed but not applied: which field of the payload carries
+        // the recharge threshold is unverified, and guessing it would write a
+        // wrong value into the vendor's node.
         let (stop_charging, limit, _force, _recharge) =
             Self::parse_charge_limit_control_payload(value);
         if let Some(limit) = limit {
@@ -1369,6 +1388,11 @@ impl Adapter {
             *self.chg_up_limit_value.lock() = limit.to_string();
         } else {
             *self.chg_up_limit_value.lock() = value.to_string();
+        }
+        if let Some(percent) = parse_first_int(&self.chg_up_limit_value.lock().clone())
+            .filter(|value| (1..=100).contains(value))
+        {
+            self.backend.set_charge_limit(Some(percent));
         }
         if stop_charging != 0 {
             *self.charge_limit_active.lock() = true;
@@ -1401,12 +1425,29 @@ impl Adapter {
         } else {
             self.update_charge_limit_latch();
         }
+        // `Some(None)` clears the limit, `Some(Some(p))` applies one, and `None`
+        // leaves the vendor control untouched when the payload carries no usable
+        // percentage.
+        let target = if enabled == 0 {
+            Some(None)
+        } else {
+            limit
+                .or_else(|| parse_first_int(&self.chg_up_limit_value.lock().clone()))
+                .filter(|value| (1..=100).contains(value))
+                .map(Some)
+        };
+        if let Some(target) = target {
+            self.backend.set_charge_limit(target);
+        }
         // The on/off flag stays in memory and is applied through
         // `set_charge_control`. `smart_chg` and `night_charging` are separate
         // features; writing the limit switch into them turns night charging on.
         self.set_charge_control_active(self.desired_charge_control_active());
     }
     pub fn get_bypass_charge_status(&self) -> String {
+        if let Some(enabled) = self.backend.bypass_charge_enabled() {
+            return i32::from(enabled).to_string();
+        }
         self.bypass_charge_status.lock().clone()
     }
     pub fn set_bypass_charge_status(&self, value: &str) {
@@ -1415,6 +1456,7 @@ impl Adapter {
         let enabled = Self::parse_bypass_switch(value);
         let normalized = if enabled { "1" } else { "0" };
         *self.bypass_charge_status.lock() = normalized.into();
+        self.backend.set_bypass_charge(enabled);
         self.set_charge_control_active(self.desired_charge_control_active());
         write_string_any(BYPASS_STATUS_PATHS, normalized);
     }

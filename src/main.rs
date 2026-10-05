@@ -152,7 +152,6 @@ impl ICharger for ChargerBinderService {
         getPsyBatteryNotify;
         getPsyBatteryPchg;
         getPsyBatteryPchgResetCount;
-        getPsyInputCurrent;
         getPsyOtgOnline;
         getPsyOtgSwitch;
         getPsyQGVbatDeviation;
@@ -162,13 +161,11 @@ impl ICharger for ChargerBinderService {
         getUsbPrimalType;
         getWiredOtgOnline;
         getWirelessChargePumpEn;
-        getWirelessCurrentNow;
         getWirelessPenPresent;
         getWirelessPtmcId;
         getWirelessRXEnable;
         getWirelessRealType;
         getWirelessUserSleepMode;
-        getWirelessVoltageNow;
         nightstandby(status: i32);
         setChargeEMMode(data: &str);
         setChargerControl(data: &str);
@@ -279,6 +276,18 @@ impl ICharger for ChargerBinderService {
 
     fn getPsyBatteryCurrentNow(&self) -> BinderResult<i32> {
         Ok(self.adapter.get_battery_current_now())
+    }
+
+    fn getPsyInputCurrent(&self) -> BinderResult<i32> {
+        Ok(self.info().usb_current_now)
+    }
+
+    fn getWirelessCurrentNow(&self) -> BinderResult<i32> {
+        Ok(self.info().wireless_current_now)
+    }
+
+    fn getWirelessVoltageNow(&self) -> BinderResult<i32> {
+        Ok(self.info().wireless_voltage_now)
     }
 
     fn getPsyBatteryFcc(&self) -> BinderResult<i32> {

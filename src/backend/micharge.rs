@@ -35,7 +35,7 @@
 //!
 //! | IMiCharge getter | source node on the AIDL V2 generation | ChargerInfo field | unit |
 //! |---|---|---|---|
-//! | `getBatteryAuthentic` | `xm_power/fuelgauge/strategy_fg/authentic` | `authentic` | unconfirmed |
+//! | `getBatteryAuthentic` | `xm_power/fuelgauge/strategy_fg/authentic` | *not used* — vendor authenticity, not the OPlus question | — |
 //! | `getBatteryCapacity` | `power_supply/battery/capacity` | `battery_capacity` | percent (ABI) |
 //! | `getBatteryChargeFull` | `power_supply/battery/charge_full` | `charge_full` | µAh (ABI) |
 //! | `getBatteryChargeType` | `xm_power/charger/charger_common/real_type` | `battery_charge_type` | enum, unconfirmed |
@@ -298,10 +298,9 @@ impl ChargeBackend for MiChargeBackend {
         };
 
         // ── Battery stage ──
-        apply_int(
-            &mut info.authentic,
-            fetch(&*proxy, |p| p.getBatteryAuthentic()).as_deref(),
-        );
+        //
+        // `getBatteryAuthentic` is not called: it answers a Xiaomi-pack question,
+        // not the contract's. See `ChargerInfo::authentic`.
         apply_capacity(
             &mut info.battery_capacity,
             fetch(&*proxy, |p| p.getBatteryCapacity()).as_deref(),

@@ -51,6 +51,7 @@ fn generate(source: &Path, out_file: &Path, label: &str) {
 fn main() {
     println!("cargo:rerun-if-changed=aidl/vendor/oplus/hardware/charger/ICharger.aidl");
     println!("cargo:rerun-if-changed=aidl/vendor/xiaomi/hardware/micharge/IMiCharge.aidl");
+    println!("cargo:rerun-if-changed=aidl/vendor/lenovo/hardware/battery/IBattery.aidl");
 
     let out_dir = env::var("OUT_DIR").unwrap();
 
@@ -64,5 +65,11 @@ fn main() {
         &PathBuf::from("aidl/vendor/xiaomi/hardware/micharge/IMiCharge.aidl"),
         &PathBuf::from(&out_dir).join("micharge.rs"),
         "IMiCharge",
+    );
+
+    generate(
+        &PathBuf::from("aidl/vendor/lenovo/hardware/battery/IBattery.aidl"),
+        &PathBuf::from(&out_dir).join("lenovo_battery.rs"),
+        "IBattery",
     );
 }

@@ -54,6 +54,14 @@ fi
 [ -f "$ROOT/src/backend/hidl.rs" ] || fail "HIDL-generation node backend is missing"
 [ -f "$SYSFS" ] || fail "sysfs fallback backend is missing"
 
+LENOVO="$ROOT/src/backend/lenovo.rs"
+LENOVO_AIDL="$ROOT/aidl/vendor/lenovo/hardware/battery/IBattery.aidl"
+[ -f "$LENOVO" ] || fail "Lenovo battery HAL backend is missing"
+[ -f "$LENOVO_AIDL" ] || fail "Lenovo IBattery AIDL declaration is missing"
+
+if ! rg -q 'LenovoBackend::connect\(\)' "$BACKEND_MOD"; then
+    fail "backend selection no longer probes the Lenovo vendor HAL"
+fi
 if ! rg -q 'MiChargeBackend::connect\(\)' "$BACKEND_MOD"; then
     fail "backend selection no longer probes the Xiaomi vendor HAL"
 fi
@@ -75,11 +83,35 @@ for impl_block in "fn refresh" "fn set_charge_control" "fn power_source_changed"
     if ! rg -q "$impl_block" "$MICHARGE"; then
         fail "MiCharge backend does not implement ${impl_block#fn }"
     fi
+    if ! rg -q "$impl_block" "$LENOVO"; then
+        fail "Lenovo backend does not implement ${impl_block#fn }"
+    fi
 done
 
+# The Lenovo bridge must talk to the vendor HAL rather than reimplement it, and
+# its charge control must drive the vendor setter.
+if ! rg -q 'LENOVO_SERVICE_NAME' "$LENOVO"; then
+    fail "Lenovo backend no longer resolves the vendor service by name"
+fi
+if ! rg -q 'setUsbSupplyDisabled' "$LENOVO"; then
+    fail "Lenovo charge control no longer drives the vendor HAL"
+fi
+
 # The bridges must not carry a panic path into a root service.
-if rg -n 'unwrap\(\)|expect\(|panic!\(|unreachable!\(' "$MICHARGE" "$ROOT/src/backend/hidl.rs"; then
+if rg -n 'unwrap\(\)|expect\(|panic!\(|unreachable!\(' "$MICHARGE" "$ROOT/src/backend/hidl.rs" "$LENOVO"; then
     fail "panic path found in a HAL bridge backend"
+fi
+
+# Authenticity is a fixed, documented answer, never a forwarded vendor flag.
+# The OPlus contract asks whether the pack is an OPlus original; on Xiaomi and
+# Lenovo hardware that can only ever be "no", and ColorOS turns a 0 into a
+# non-genuine-battery warning. A backend that starts sourcing this field would
+# reintroduce that false alarm, so pin the policy here.
+if ! rg -q '^pub const AUTHENTIC_REPORTED: i32 = 1;$' "$ADAPTER"; then
+    fail "the reported battery-authenticity constant changed"
+fi
+if rg -n 'update_int_from_paths\(&mut info\.authentic|&mut info\.authentic,' "$ROOT/src/backend"; then
+    fail "a backend started sourcing battery authenticity from a node or HAL getter"
 fi
 
 # The HIDL-generation backend is a direct-node reader, never an RPC client:
@@ -132,6 +164,29 @@ if ! rg -q '^\s+String getBatteryAuthentic\(\);' "$MICHARGE_AIDL" \
 fi
 if ! rg -q 'vendor\.xiaomi\.hardware\.micharge\.IMiCharge/default' "$MICHARGE"; then
     fail "MiCharge service name changed"
+fi
+
+# ── Lenovo interface contract ──
+#
+# Same rule as above: declaration order *is* the transaction code. The device
+# library uses codes 1..53 with no gaps, so the endpoints and the count are
+# pinned. Evidence: chargehal-vendor-refs/lenovo/INTERFACE.md §3.
+
+LENOVO_METHODS="$(rg -c '^\s+(boolean|int|long|String) [A-Za-z][A-Za-z0-9]*\(' "$LENOVO_AIDL")"
+if [ "$LENOVO_METHODS" != "55" ]; then
+    fail "IBattery.aidl declares $LENOVO_METHODS methods, expected 53 business + 2 metadata"
+fi
+if ! rg -q '^\s+boolean getBatteryMaintenanceEnabledV2\(\);' "$LENOVO_AIDL"; then
+    fail "IBattery transaction code 1 changed; the device order is fixed"
+fi
+if ! rg -q '^\s+String getChargeAdapterType\(\);' "$LENOVO_AIDL"; then
+    fail "IBattery transaction code 53 changed; the device order is fixed"
+fi
+if ! rg -q 'vendor\.lenovo\.hardware\.battery\.IBattery/default' "$LENOVO"; then
+    fail "Lenovo service name changed"
+fi
+if ! rg -q '^// interface hash:  7ecc7f65d867ea475e72a3598c065dd7e5c303dc$' "$LENOVO_AIDL"; then
+    fail "IBattery interface hash no longer matches the official device library"
 fi
 
 # ── Screen-transition cancellation ──

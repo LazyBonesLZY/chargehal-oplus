@@ -33,7 +33,7 @@
 //!   `battery/current_now` (µA), `battery/temp` (0.1 °C),
 //!   `battery/voltage_now` (µV), `usb/voltage_now` (µV).
 //! * Dual-family nodes, branch-selected, copied verbatim (grade C, never
-//!   scaled): `authentic`, `real_type`, `quick_charge_type`, `pd_authentication`
+//!   scaled): `real_type`, `quick_charge_type`, `pd_authentication`
 //!   / `pd_verifed`, `fastcharge_mode` / `fastchg_mode`, `soh`, `input_suspend`,
 //!   `night_charging`, `smart_batt`, `soc_decimal`(+`_rate`), car-adapter type.
 //!   `power_max` is the one exception: it goes through the shared W/mW/µW
@@ -111,10 +111,6 @@ const VBAT: &str = "/sys/class/power_supply/battery/voltage_now";
 const USB_VOLTAGE: &str = "/sys/class/power_supply/usb/voltage_now";
 
 // Dual-family nodes (grade C): index 0 = power_supply branch, 1 = qcom branch.
-const AUTHENTIC: [&str; 2] = [
-    "/sys/class/power_supply/bms/authentic",
-    "/sys/class/qcom-battery/authentic",
-];
 const REAL_TYPE: [&str; 2] = [
     "/sys/class/power_supply/usb/real_type",
     "/sys/class/qcom-battery/real_type",
@@ -329,7 +325,7 @@ impl ChargeBackend for HidlBackend {
         }
 
         // ── Branch-selected nodes (grade C, verbatim) ──
-        sysfs::update_int_from_paths(&mut info.authentic, &[AUTHENTIC[b]]);
+        // `authentic` is not read, for the same reason as the AIDL backend.
         let real_type = sysfs::read_string_any(&[REAL_TYPE[b]]);
         if !real_type.is_empty() {
             info.usb_real_type = real_type.clone();
@@ -459,8 +455,7 @@ mod tests {
         // service runs with cwd=/. Copying one of those literals verbatim would
         // silently make a read depend on our working directory, which is the
         // one class of bug in this file a host test can actually catch.
-        let dual: [&[&str]; 15] = [
-            &AUTHENTIC,
+        let dual: [&[&str]; 14] = [
             &REAL_TYPE,
             &QUICK_CHARGE_TYPE,
             &PD_VERIFIED,

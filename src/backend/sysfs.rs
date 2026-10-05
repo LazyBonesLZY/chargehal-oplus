@@ -255,10 +255,10 @@ pub fn is_data_port_usb_type(value: &str) -> bool {
 /// Whether the attached USB source is a data port (SDP/CDP) rather than a
 /// charger.
 ///
-/// Both backends need this: fast-charge evidence must be dropped when a
-/// computer is on the other end of the cable. The vendor HAL has no getter for
-/// `usb_type` or `pc_port_online`, so the HAL backend fills those from the
-/// kernel nodes and then asks the same question here.
+/// Every backend needs this: fast-charge evidence must be dropped when a
+/// computer is on the other end of the cable. `usb_real_type` is the primary
+/// signal and the Lenovo bridge fills it from the vendor charger type; where a
+/// backend has neither, `pc_port_online` is the fallback.
 pub fn is_data_port(info: &ChargerInfo) -> bool {
     info.usb_online != 0
         && (info.pc_port_online != 0
@@ -414,6 +414,8 @@ pub const CC_ORIENTATION: &str = "/sys/class/qcom-battery/cc_orientation";
 pub const CURRENT_STATE: &str = "/sys/class/qcom-battery/current_state";
 pub const SPORT_MODE: &str = "/sys/class/qcom-battery/sport_mode";
 pub const WIRELESS_TYPE: &str = "/sys/class/qcom-battery/wireless_type";
+pub const WIRELESS_VOLTAGE: &str = "/sys/class/power_supply/wireless/voltage_now";
+pub const WIRELESS_CURRENT: &str = "/sys/class/power_supply/wireless/current_now";
 pub const SMART_CHG: &str = "/sys/class/qcom-battery/smart_chg";
 pub const NIGHT_CHARGING: &str = "/sys/class/qcom-battery/night_charging";
 pub const SMART_BATT: &str = "/sys/class/qcom-battery/smart_batt";
@@ -473,6 +475,8 @@ where
         ],
     );
     update_non_empty_string_from_paths(&mut info.wireless_type, &[WIRELESS_TYPE]);
+    update_int_from_paths(&mut info.wireless_voltage_now, &[WIRELESS_VOLTAGE]);
+    update_int_from_paths(&mut info.wireless_current_now, &[WIRELESS_CURRENT]);
     if should_cancel() {
         return false;
     }
@@ -600,10 +604,8 @@ where
     update_int_from_paths(&mut info.thermal_board_temp, &[THERMAL_BOARD_TEMP]);
 
     update_non_empty_string_from_paths(&mut info.batt_sn, BATT_SN_PATHS);
-    // This backend has no OPPO auth node. Keep reporting a genuine battery so
-    // ColorOS does not flag every Xiaomi pack. The HAL backends overwrite
-    // this with the vendor node on their own refresh path.
-    info.authentic = 1;
+    // Fixed, not read: see `ChargerInfo::authentic`.
+    info.authentic = crate::adapter::AUTHENTIC_REPORTED;
     update_int_from_paths(&mut info.batt_cont_online, &[BATT_CONT_ONLINE]);
     update_int_from_paths(&mut info.max_life_temp, &[MAX_LIFE_TEMP]);
     update_int_from_paths(&mut info.max_life_vol, &[MAX_LIFE_VOL]);
