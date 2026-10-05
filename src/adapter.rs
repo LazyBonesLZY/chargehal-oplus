@@ -1153,7 +1153,7 @@ impl Adapter {
             info.wireless_current_now,
             "",
             0,
-            info.wireless_voltage_now.to_string(),
+            info.wireless_voltage_now,
             "",
             0,
             "",
