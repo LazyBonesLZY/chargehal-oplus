@@ -36,6 +36,8 @@ jobs:
 
   android-build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -75,3 +77,30 @@ jobs:
 
       - name: Validate Android binary
         run: ./tools/validate-static.sh dist/vendor.oplus.hardware.charger-V6-service
+
+      # One release per build, tagged with the short SHA, carrying the three
+      # files a ROM integrator needs: the service binary, the init .rc and the
+      # VINTF manifest. Re-running the same commit re-uploads instead of
+      # failing on an existing tag. PR builds never publish.
+      - name: Publish release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          SHA="$(git rev-parse --short=7 HEAD)"
+          TAG="snapshot-$SHA"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" --clobber \
+              dist/vendor.oplus.hardware.charger-V6-service \
+              dist/charger-hal-service.rc \
+              dist/charger-hal-service.xml
+          else
+            gh release create "$TAG" --target "$GITHUB_SHA" \
+              --title "Charger HAL snapshot $SHA" \
+              --notes "Automated build of $SHA ($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/commit/$GITHUB_SHA): service binary (installs to /odm/bin/hw), init .rc, VINTF manifest. Not verified on a device." \
+              dist/vendor.oplus.hardware.charger-V6-service \
+              dist/charger-hal-service.rc \
+              dist/charger-hal-service.xml
+          fi
+          gh release view "$TAG" --json tagName,url -q '"\(.tagName) \(.url)"'
