@@ -40,29 +40,31 @@ depends on the target kernel, ROM, SELinux policy, and available sysfs nodes.
 
 ## Charging backends
 
-Two backends implement the same `ChargeBackend` trait, and the adapter picks one
-at startup:
+Three backends implement the same `ChargeBackend` trait, and the adapter picks one
+at startup, in this order:
 
 1. **Xiaomi MiCharge HAL** ([`src/backend/micharge.rs`](src/backend/micharge.rs)) —
    preferred. Talks to `vendor.xiaomi.hardware.micharge.IMiCharge/default` over
-   binder and moves the HAL's string results into the adapter snapshot. The
+   live AIDL and moves the HAL's string results into the adapter snapshot. The
    vendor HAL already absorbs the per-model kernel layout, which is why it wins:
    node names, units and permissions differ between kernel generations.
-2. **Kernel nodes** ([`src/backend/sysfs.rs`](src/backend/sysfs.rs)) — fallback.
+2. **Xiaomi HIDL-generation nodes** ([`src/backend/hidl.rs`](src/backend/hidl.rs)) —
+   used when the AIDL service is unreachable but the device declares the Xiaomi
+   HIDL 1.0 generation
+   (`/vendor/etc/vintf/manifest/vendor.xiaomi.hardware.micharge@1.0.xml`). It
+   reads that generation's own node map (`power_supply` / `qcom-battery`,
+   branch-selected by `ro.board.platform`) directly. This is deliberately **not**
+   an HIDL RPC client: the transport needs device-only C++ proxy classes and a
+   second binder domain this crate's AIDL-only stack cannot open, and the vendor
+   implementation returns those same node contents verbatim, so the node map is
+   the honest data path here.
+3. **Kernel nodes** ([`src/backend/sysfs.rs`](src/backend/sysfs.rs)) — fallback.
    Reads `power_supply` and `qcom-battery` nodes directly. Always available, so a
-   device without the vendor HAL still reports sane charging data.
+   device without either vendor generation still reports sane charging data.
 
 If the vendor HAL dies mid-session the bridge reconnects on the next scan; while
 it is unreachable every call is delegated to the node reader, so a dead HAL
 degrades to the fallback rather than stalling the poll worker.
-
-The HIDL generation of the vendor HAL is deliberately not bridged. On those
-devices the HAL reads the same `/sys/class/qcom-battery/*` and
-`/sys/class/power_supply/*` nodes that the fallback backend reads, so bridging
-would route identical data through an extra binder hop and buy architectural
-consistency only. The devices that actually need the bridge are the ones whose
-kernel moved to `/sys/class/xm_power/*`, and those are served by the AIDL
-bridge.
 
 ### Unit handling
 
@@ -167,10 +169,17 @@ latency. Do not run it on a primary device.
 
 - This is a device-specific Xiaomi/ColorOS compatibility layer, not a generic Android HAL.
 - **Nothing here has been verified on a device.** The build, the unit tests and
-  the static checks pass; the bridge has never been observed talking to a real
-  HAL. Treat the first device run as the real test.
+  the static checks pass; neither the AIDL bridge nor the HIDL-generation node
+  map has been observed against a real HAL. Treat the first device run as the
+  real test.
+- The HIDL-generation backend is a direct-node reader keyed to that
+  generation's mapping, not an HIDL RPC client. It cannot see anything the
+  vendor HAL process itself would refuse to serve, and its `qcom-battery` /
+  `power_supply` branch choice follows the constructor rule recovered from the
+  binary.
 - The bridge targets the AIDL V2 generation of the Xiaomi HAL. A device that only
-  ships the HIDL 1.0 generation falls back to the kernel-node reader.
+  ships the HIDL 1.0 generation uses the HIDL-generation node backend, which
+  reads that generation's node map directly instead of speaking HIDL RPC.
 - Several `ICharger` methods are specified to return the raw contents of OPPO
   private nodes (`/sys/class/oplus_chg/*`, `/proc/charger/*`, `/proc/wireless/*`).
   Those nodes do not exist on Xiaomi kernels, so such calls return an empty

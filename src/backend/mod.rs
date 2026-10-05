@@ -3,15 +3,22 @@
 //! The adapter never talks to the kernel directly. It asks a backend for a
 //! snapshot and the backend decides where the numbers come from:
 //!
-//! * [`micharge`] proxies the Xiaomi `IMiCharge` vendor HAL, which already
-//!   absorbs the per-model sysfs layout differences.
-//! * [`sysfs`] reads kernel nodes directly. It is the fallback used when the
-//!   vendor HAL is missing or has died.
+//! * [`micharge`] proxies the Xiaomi `IMiCharge` vendor HAL over live AIDL,
+//!   which already absorbs the per-model sysfs layout differences.
+//! * [`hidl`] serves the Xiaomi HIDL 1.0 generation by reading that
+//!   generation's own node map directly. It is explicitly not an HIDL RPC
+//!   client (see its module docs for why that road is closed); the vendor
+//!   implementation returns those same node contents verbatim, so the map is
+//!   the honest data path here.
+//! * [`sysfs`] reads kernel nodes directly. It is the fallback used when
+//!   neither vendor generation is detectable.
 //!
-//! The vendor HAL is preferred: node names, units and permissions differ
-//! between kernel generations, and the HAL hides that. The node reader stays
-//! available so a device without the HAL still reports sane charging data.
+//! Selection order is live AIDL first, HIDL generation second, generic nodes
+//! last. Only the AIDL probe touches binder; the HIDL-generation check is a
+//! pair of manifest file probes, so a non-Xiaomi device pays two failed
+//! `stat` calls and nothing else.
 
+pub mod hidl;
 pub mod micharge;
 pub mod sysfs;
 
@@ -50,8 +57,9 @@ pub trait ChargeBackend: Send + Sync {
 
 /// Probe the available backends and return the preferred one.
 ///
-/// The Xiaomi vendor HAL wins when it is reachable; otherwise the kernel-node
-/// reader takes over so that charging still reports sane data.
+/// Order: live AIDL vendor HAL first; when that is unreachable but the device
+/// declares the Xiaomi HIDL 1.0 generation, the HIDL-generation node backend;
+/// otherwise the generic kernel-node reader so charging still reports data.
 pub fn select() -> Arc<dyn ChargeBackend> {
     // The vendor HAL only exists on device. On the host (unit tests) there is no
     // servicemanager to talk to, so go straight to the node reader instead of
@@ -64,10 +72,63 @@ pub fn select() -> Arc<dyn ChargeBackend> {
                 return Arc::new(backend);
             }
             Err(error) => {
-                tracing::warn!("Xiaomi MiCharge HAL unavailable ({error}); falling back to sysfs");
+                tracing::warn!("Xiaomi MiCharge HAL unavailable ({error}); probing generation");
             }
+        }
+        if select_kind(
+            false,
+            hidl::manifest_present(hidl::HIDL_MANIFEST),
+            hidl::manifest_present(hidl::AIDL_MANIFEST),
+        ) == BackendKind::HidlNodes
+        {
+            let backend = hidl::HidlBackend::new();
+            tracing::info!(
+                "charging backend: {} (Xiaomi HIDL-generation nodes)",
+                backend.name()
+            );
+            return Arc::new(backend);
         }
     }
 
     Arc::new(sysfs::SysfsBackend::new())
+}
+
+/// Backend chosen by [`select_kind`]. Kept as a plain enum so the selection
+/// rule stays unit-testable without touching binder or the filesystem.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackendKind {
+    /// Live AIDL vendor HAL proxy.
+    Aidl,
+    /// Xiaomi HIDL-generation direct-node reader.
+    HidlNodes,
+    /// Generic kernel-node reader.
+    Sysfs,
+}
+
+/// Selection rule: a reachable AIDL service always wins; otherwise the HIDL
+/// fragment (without the AIDL fragment) routes to the generation backend;
+/// everything else falls through to the generic reader.
+pub fn select_kind(aidl_live: bool, hidl_manifest: bool, aidl_manifest: bool) -> BackendKind {
+    if aidl_live {
+        BackendKind::Aidl
+    } else if hidl_manifest && !aidl_manifest {
+        BackendKind::HidlNodes
+    } else {
+        BackendKind::Sysfs
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{select_kind, BackendKind};
+
+    #[test]
+    fn selection_prefers_live_aidl_then_hidl_generation() {
+        assert_eq!(select_kind(true, false, false), BackendKind::Aidl);
+        assert_eq!(select_kind(true, true, false), BackendKind::Aidl);
+        assert_eq!(select_kind(false, true, false), BackendKind::HidlNodes);
+        assert_eq!(select_kind(false, true, true), BackendKind::Sysfs);
+        assert_eq!(select_kind(false, false, false), BackendKind::Sysfs);
+        assert_eq!(select_kind(false, false, true), BackendKind::Sysfs);
+    }
 }

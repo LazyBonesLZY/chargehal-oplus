@@ -48,13 +48,20 @@ if ! printf '%s\n' "$POLL_PRIORITY_BODY" | rg -q 'setpriority.*10'; then
     fail "poll worker no longer yields to display work"
 fi
 
-# ── Backend selection: vendor HAL first, kernel nodes as fallback ──
+# ── Backend selection: live AIDL HAL, HIDL-generation nodes, kernel nodes ──
 
 [ -f "$MICHARGE" ] || fail "MiCharge HAL backend is missing"
+[ -f "$ROOT/src/backend/hidl.rs" ] || fail "HIDL-generation node backend is missing"
 [ -f "$SYSFS" ] || fail "sysfs fallback backend is missing"
 
 if ! rg -q 'MiChargeBackend::connect\(\)' "$BACKEND_MOD"; then
     fail "backend selection no longer probes the Xiaomi vendor HAL"
+fi
+if ! rg -q 'HidlBackend::new\(\)' "$BACKEND_MOD"; then
+    fail "backend selection no longer routes to the HIDL-generation backend"
+fi
+if ! rg -q 'select_kind' "$BACKEND_MOD"; then
+    fail "backend selection rule is no longer a testable function"
 fi
 if ! rg -q 'SysfsBackend::new\(\)' "$BACKEND_MOD"; then
     fail "backend selection has no kernel-node fallback"
@@ -70,9 +77,17 @@ for impl_block in "fn refresh" "fn set_charge_control" "fn power_source_changed"
     fi
 done
 
-# The bridge must not carry a panic path into a root service.
-if rg -n 'unwrap\(\)|expect\(|panic!\(|unreachable!\(' "$MICHARGE"; then
-    fail "panic path found in the MiCharge bridge backend"
+# The bridges must not carry a panic path into a root service.
+if rg -n 'unwrap\(\)|expect\(|panic!\(|unreachable!\(' "$MICHARGE" "$ROOT/src/backend/hidl.rs"; then
+    fail "panic path found in a HAL bridge backend"
+fi
+
+# The HIDL-generation backend is a direct-node reader, never an RPC client:
+# none of the HIDL transport symbols may appear in source. (Plain prose
+# mentioning "HIDL" is fine; these tokens would mean someone started building
+# the client ABI by hand.)
+if rg -n 'libhidlbase|hwservicemanager|hidl_string|BpHw|BnHw|HIDL_FETCH|::getService|registerAsService|configureRpc|joinRpc|/dev/hwbinder' "$ROOT/src"; then
+    fail "HIDL transport client symbols found in source"
 fi
 
 # The fallback backend must always be usable: it depends on nothing external.

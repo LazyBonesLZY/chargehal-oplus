@@ -48,15 +48,29 @@ jobs:
         with:
           targets: aarch64-linux-android
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
+      # android-actions/setup-android is deliberately not used here: its v3
+      # line installs the removed legacy `tools` package and the runner already
+      # ships the SDK + cmdline-tools at $ANDROID_SDK_ROOT, so we only need the
+      # NDK on top.
       - name: Install Android NDK r29
-        run: sdkmanager --install "ndk;29.0.14206865"
+        run: |
+          set -eu
+          SDK="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          TOOLS_BIN="$(find "$SDK/cmdline-tools" -maxdepth 3 -type f -name sdkmanager -print -quit | xargs -r dirname)"
+          if [ -z "$TOOLS_BIN" ]; then
+            echo "sdkmanager not found under $SDK/cmdline-tools" >&2
+            exit 1
+          fi
+          PATH="$TOOLS_BIN:$PATH"
+          export PATH
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+          sdkmanager --install "ndk;29.0.14206865"
+          test -x "$SDK/ndk/29.0.14206865/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang"
 
       - name: Build Android ARM64 release
         run: |
-          export ANDROID_NDK_HOME="${ANDROID_SDK_ROOT:-$ANDROID_HOME}/ndk/29.0.14206865"
+          SDK="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          export ANDROID_NDK_HOME="$SDK/ndk/29.0.14206865"
           ./build.sh release
 
       - name: Validate Android binary
