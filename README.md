@@ -30,12 +30,12 @@ depends on the target kernel, ROM, SELinux policy, and available sysfs nodes.
 
 ## Features
 
-- Battery, USB, PD, charge-pump, and wireless charging state.
+- Battery, USB, PD, and wireless charging state.
 - Vendor-HAL bridging first: data comes from `vendor.xiaomi.hardware.micharge`
   when that HAL is reachable, with direct kernel-node reads as the fallback.
 - Background cache refreshed by power-supply uevents and timed polling.
 - Fast-charge classification with USB data-port protection.
-- Charge limit, bypass charging, and cooldown controls when supported by the device.
+- Charge limiting through the vendor HAL, with a node-based fallback.
 - Compatibility stubs for unsupported ColorOS calls.
 
 ## Charging backends
@@ -52,10 +52,9 @@ at startup:
    Reads `power_supply` and `qcom-battery` nodes directly. Always available, so a
    device without the vendor HAL still reports sane charging data.
 
-The bridge does no unit conversion of its own for private nodes, because the
-vendor HAL does none either: only standard `power_supply` nodes carry an
-ABI-backed scale. Per-method evidence lives in
-`chargehal-vendor-refs/MICHARGE-MAPPING.md`.
+If the vendor HAL dies mid-session the bridge reconnects on the next scan; while
+it is unreachable every call is delegated to the node reader, so a dead HAL
+degrades to the fallback rather than stalling the poll worker.
 
 The HIDL generation of the vendor HAL is deliberately not bridged. On those
 devices the HAL reads the same `/sys/class/qcom-battery/*` and
@@ -64,6 +63,55 @@ would route identical data through an extra binder hop and buy architectural
 consistency only. The devices that actually need the bridge are the ones whose
 kernel moved to `/sys/class/xm_power/*`, and those are served by the AIDL
 bridge.
+
+### Unit handling
+
+The vendor HAL performs no conversion — it returns node contents verbatim — so
+every unit decision is ours. Node evidence is graded and the grade decides how a
+value may be used:
+
+- **A grade** — the node is standard Linux `power_supply` ABI, so the unit is
+  fixed by that ABI and the value is used as-is (`capacity` %, `voltage_now` µV,
+  `current_now` µA, `temp` 0.1 °C, `charge_full`/`charge_counter` µAh,
+  `cycle_count` count).
+- **C grade** — the node is vendor-private (`xm_power/*`, `qcom-battery/*`) and
+  has no documented scale. These values are copied through **verbatim, never
+  scaled**. A guessed factor is worse than an unconverted number, because it
+  looks plausible.
+
+There is no B grade: the HAL contains no arithmetic at all, so nothing can be
+reverse-derived from it. `adapter_power_w` is the one known exception — it reads
+a private node through a W/mW/µW threshold heuristic and needs a device reading
+to confirm.
+
+## Implementation notes
+
+Details that will bite anyone editing the bridge:
+
+- **`IMiCharge.aidl` declaration order is the transaction code.** It was
+  recovered by disassembling the on-device interface library and matches codes
+  1..56. Reordering the file silently breaks every call.
+- **`getMiChargePath` must not be called with the keys `set_cycle_power` or
+  `unset_cycle_power`.** The latter makes the vendor HAL kill itself
+  (`raise(SIGINT)` + `raise(SIGALRM)`). The interface is currently not used at
+  all, which is why this is latent rather than active.
+- **`setMiChargePath` is not a general write path.** An unknown key makes the HAL
+  return 0 without writing anything, so a caller would read success.
+- **`setCoolModeState` is a stub** — it shares its address with the getter and
+  only logs. Charge limiting uses `setInputSuspendState`, the only working
+  restrict switch on this generation.
+- **The HAL returns whole node contents**, not the first line: multi-line values
+  keep their inner newlines, so a numeric parse on such a node fails and the
+  previous value is retained.
+- **Node reads never zero a field.** A failed or missing read keeps the previous
+  value (`update_int_from_paths` and friends). Preserve that when adding reads.
+- **Same leaf name does not mean the same quantity across kernel generations.**
+  Of 29 shared node names only 6 are safe to treat as equivalent; `soh`,
+  `soc_decimal`, `power_max` and `resistance` all differ in meaning or scale.
+- **`tools/validate-static.sh` asserts on source text.** Renaming a function or
+  moving code makes it fail; update the script alongside the change.
+- **`src/lib.rs` needs `pub mod backend;`** — a private module chain turns a batch
+  of public items into dead code and fails `clippy -D warnings`.
 
 ## Build
 
@@ -118,14 +166,23 @@ latency. Do not run it on a primary device.
 ## Limitations
 
 - This is a device-specific Xiaomi/ColorOS compatibility layer, not a generic Android HAL.
+- **Nothing here has been verified on a device.** The build, the unit tests and
+  the static checks pass; the bridge has never been observed talking to a real
+  HAL. Treat the first device run as the real test.
 - The bridge targets the AIDL V2 generation of the Xiaomi HAL. A device that only
   ships the HIDL 1.0 generation falls back to the kernel-node reader.
 - Several `ICharger` methods are specified to return the raw contents of OPPO
   private nodes (`/sys/class/oplus_chg/*`, `/proc/charger/*`, `/proc/wireless/*`).
   Those nodes do not exist on Xiaomi kernels, so such calls return an empty
-  string. `queryChargeInfo` and `getPsyBatteryStatus` were rebuilt to the official
-  wire format; the remaining gaps are listed in
-  `chargehal-vendor-refs/FORMAT-CONTRACT.md` §7.
+  string. `queryChargeInfo` and `getPsyBatteryStatus` follow the official wire
+  format; the remaining gaps are documented in the source.
+- **Decimal SOC is collected but not served.** The vendor HAL's decimal node is
+  not the one the official contract names, and its scale (×100 vs ×1000) is
+  unconfirmed, so it is surfaced only through the SOH debug interface until a
+  device reading settles it.
+- **USB data-port protection is incomplete on the bridge path.** The node that
+  could carry `usb_type` has an unverified value domain, and reading it wrong
+  would classify every charger as a data port; only `pc_port_online` is used.
 - Charging node names, units, permissions, and control behavior vary by kernel.
 - Some OPlus methods are stubs because the target Xiaomi kernel lacks the corresponding hardware.
 - Authentication and short-circuit health values include target-specific compatibility behavior.

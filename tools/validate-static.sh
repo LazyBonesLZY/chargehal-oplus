@@ -81,6 +81,29 @@ if ! printf '%s\n' "$SYSFS_AVAILABLE_BODY" | rg -q 'true'; then
     fail "sysfs fallback backend is no longer always available"
 fi
 
+# ── OPlus interface contract ──
+#
+# The declaration order of these methods *is* their transaction code, and the
+# ColorOS client indexes by it. A reorder or a dropped method is invisible to the
+# compiler, so pin the count, both endpoints and the advertised hash.
+
+OPLUS_AIDL="$ROOT/aidl/vendor/oplus/hardware/charger/ICharger.aidl"
+[ -f "$OPLUS_AIDL" ] || fail "ICharger.aidl is missing"
+
+OPLUS_METHODS="$(rg -c '^\s+[A-Za-z][A-Za-z0-9_]* [A-Za-z][A-Za-z0-9_]*\(' "$OPLUS_AIDL")"
+if [ "$OPLUS_METHODS" != "132" ]; then
+    fail "ICharger.aidl declares $OPLUS_METHODS methods, expected 130 business + 2 metadata"
+fi
+if ! rg -q '^\s+int VolDividerIcWorkModeSet\(in String data\);' "$OPLUS_AIDL"; then
+    fail "ICharger transaction code 1 changed; the device order is fixed"
+fi
+if ! rg -q '^\s+String getUsbCurrentEyeDiagram\(int model\);' "$OPLUS_AIDL"; then
+    fail "ICharger transaction code 130 changed; the device order is fixed"
+fi
+if ! rg -q '^pub const INTERFACE_HASH: &str = "046dfc7a9ca30bfca848ced6e9474f47437b0db7";$' "$ROOT/src/lib.rs"; then
+    fail "ICharger interface hash no longer matches the official device library"
+fi
+
 # ── Xiaomi interface contract ──
 
 [ -f "$MICHARGE_AIDL" ] || fail "IMiCharge.aidl is missing"
@@ -99,6 +122,7 @@ fi
 # ── Screen-transition cancellation ──
 
 PROBE_BODY="$(sed -n '/fn power_source_probe_changed/,/^    }/p' "$SYSFS")"
+[ -n "$PROBE_BODY" ] || fail "power_source_probe_changed not found; the probe assertion went stale"
 if printf '%s\n' "$PROBE_BODY" | rg 'poll_once|thread::sleep|write_'; then
     fail "lightweight power-source probe became a full or blocking scan"
 fi
@@ -145,6 +169,7 @@ if ! printf '%s\n' "$WAKE_BODY" | rg -q 'try_send'; then
 fi
 
 DECIMAL_BODY="$(sed -n '/pub fn get_decimal_soc/,/^    }/p' "$ADAPTER")"
+[ -n "$DECIMAL_BODY" ] || fail "get_decimal_soc not found; the decimal-soc assertion went stale"
 if printf '%s\n' "$DECIMAL_BODY" | rg 'read_|write_|sleep|request_refresh|thread::'; then
     fail "I/O or scheduling work found in get_decimal_soc"
 fi

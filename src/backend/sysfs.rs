@@ -194,6 +194,37 @@ pub fn is_data_port_usb_type(value: &str) -> bool {
     )
 }
 
+/// Whether the attached USB source is a data port (SDP/CDP) rather than a
+/// charger.
+///
+/// Both backends need this: fast-charge evidence must be dropped when a
+/// computer is on the other end of the cable. The vendor HAL has no getter for
+/// `usb_type` or `pc_port_online`, so the HAL backend fills those from the
+/// kernel nodes and then asks the same question here.
+pub fn is_data_port(info: &ChargerInfo) -> bool {
+    info.usb_online != 0
+        && (info.pc_port_online != 0
+            || is_data_port_usb_type(&info.usb_real_type)
+            || (info.usb_real_type.is_empty() && is_data_port_usb_type(&info.usb_type)))
+}
+
+/// Drop every fast-charge claim while keeping the connection state.
+///
+/// Used when the attached port turns out to be a data port: whatever the
+/// charger nodes reported beforehand is stale evidence and must not reach the
+/// classifier.
+pub fn suppress_fast_charge_evidence(info: &mut ChargerInfo) {
+    info.quick_charge_type = "0".into();
+    info.pd_verified = 0;
+    info.cp_online = 0;
+    info.cp_status.clear();
+    info.cp_master_iin = 0;
+    info.cp_slave_iin = 0;
+    info.fastchg_mode = 0;
+    info.sport_mode = 0;
+    info.adapter_power_w = 0;
+}
+
 // ── sysfs paths ──
 
 pub const PSY_BATTERY: &str = "/sys/class/power_supply/battery";
@@ -533,22 +564,11 @@ where
     }
 
     let charger_online = info.usb_online != 0 || info.ac_online != 0 || info.wireless_online != 0;
-    let data_port = info.usb_online != 0
-        && (info.pc_port_online != 0
-            || is_data_port_usb_type(&info.usb_real_type)
-            || (info.usb_real_type.is_empty() && is_data_port_usb_type(&info.usb_type)));
+    let data_port = is_data_port(info);
     if !charger_online {
         clear_fast_charge_session(info);
     } else if data_port {
-        info.quick_charge_type = "0".into();
-        info.pd_verified = 0;
-        info.cp_online = 0;
-        info.cp_status.clear();
-        info.cp_master_iin = 0;
-        info.cp_slave_iin = 0;
-        info.fastchg_mode = 0;
-        info.sport_mode = 0;
-        info.adapter_power_w = 0;
+        suppress_fast_charge_evidence(info);
     } else {
         let adapter_power_w = estimate_power(info);
         if should_cancel() {

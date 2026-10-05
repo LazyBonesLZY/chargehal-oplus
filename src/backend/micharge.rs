@@ -45,7 +45,7 @@
 //! | `getBatteryTbat` | `power_supply/battery/temp` | `battery_temp` | 0.1 °C (ABI) |
 //! | `getBatteryVbat` | `power_supply/battery/voltage_now` | `battery_voltage_now` | µV (ABI) |
 //! | `getChargingPowerMax` | `xm_power/charger/charger_common/power_max` | `adapter_power_w` | unconfirmed |
-//! | `getPdApdoMax` | `xm_power/typec/apdo_max` | `adapter_power_w` (fallback) | unconfirmed |
+//! | `getPdApdoMax` | `xm_power/typec/apdo_max` | *not used* — carries a PDO index, not a wattage | unconfirmed |
 //! | `getFastChargeModeStatus` | `xm_power/fuelgauge/strategy_fg/fast_charge` | `fastchg_mode` | enum, unconfirmed |
 //! | `getInputSuspendState` | `xm_power/charger/charge_interface/input_suspend` | `input_suspend` | 0/1, unconfirmed |
 //! | `getNightChargingState` | `xm_power/charger/smart_charge/smart_night` | `night_charging` | 0/1, unconfirmed |
@@ -53,13 +53,18 @@
 //! | `getQuickChargeType` | `xm_power/charger/charger_common/quick_charge_type` | `quick_charge_type` | enum, unconfirmed |
 //! | `getUsbCurrent` | `power_supply/usb/current_now` | `usb_current_now` | µA (ABI) |
 //! | `getUsbVoltage` | `power_supply/usb/voltage_now` | `usb_voltage_now` (+ `usb_online`) | µV (ABI) |
-//! | `getWirelessChargingStatus` | `xm_power/charger/wls_rev_charge/reverse_chg_mode` | `wireless_online` | semantics doubtful |
+//! | `getSBState` | `xm_power/charger/smart_charge/smart_batt` | `smart_batt` | 0/1, unconfirmed |
+//! | `getSocDecimal` | `xm_power/fuelgauge/strategy_fg/soc_decimal` | `soc_decimal` (collected, not served) | unconfirmed |
+//! | `getSocDecimalRate` | `xm_power/fuelgauge/strategy_fg/soc_decimal_rate` | `soc_decimal_rate` (collected, not served) | unconfirmed |
+//! | `getWirelessChargingStatus` | `xm_power/charger/wls_rev_charge/reverse_chg_mode` | *not used* — reverse-charge mode, not wireless online | — |
 //! | `getCarChargingType` | `xm_power/charger/wls_basic_charge/wls_car_adapter` | `wireless_type` | enum, unconfirmed |
 //!
 //! # Method names do not carry units
 //!
-//! The vendor HAL performs **no** conversion: every getter returns the first
-//! line of a sysfs node verbatim. The same method name can therefore read
+//! The vendor HAL performs **no** conversion: every getter returns the node
+//! contents verbatim — it reads the whole file, joins the lines back with `\n`
+//! and strips one trailing newline, so a multi-line node keeps its inner
+//! newlines. The same method name can therefore read
 //! different physical quantities on different generations — `getBatteryResistance`
 //! is a pack identification resistor on V2 but a cell internal resistance on the
 //! HIDL generation, and `getBatteryThermaLevel` reads a thermal control limit,
@@ -68,8 +73,11 @@
 //! factor is baked in for them. Confirm against real device readings before
 //! trusting those values.
 //!
-//! `getWirelessChargingStatus` is mapped to `wireless_online` but actually reads
-//! the reverse-charging mode node, so treat that field as approximate.
+//! `getWirelessChargingStatus` is **not** used: on every generation it reads the
+//! reverse-charging mode node (`getWirelessReverseStatus` reads the very same
+//! node), so mapping it to `wireless_online` would make an active reverse-charge
+//! session look like incoming wireless power. `wireless_online` comes from the
+//! kernel node instead.
 //!
 //! # TODO(confirm)
 //!
@@ -77,22 +85,26 @@
 //! are deliberately not called from [`MiChargeBackend::refresh`]:
 //!
 //! * `getBatteryResistance` — `xm_power/battery/resistance_id`, no matching field.
-//! * `getBatteryThermaLevel` — `thermal_message/sconfig`, no matching field.
+//! * `getBatteryThermaLevel` — `xm_power/charger/charger_thermal/wired_ctrl_limit`,
+//!   no matching field.
 //! * `getBtTransferStartState` — `wireless_master/bt_transfer_start`, no field.
 //! * `getCoolModeState` — no field, and confirmed unimplemented on V2: the
 //!   vendor service only logs `not support coolMode` and returns an empty
 //!   string. `setCoolModeState` shares that address and returns 0 without
 //!   writing anything.
-//! * `getPSValue`, `getSBState` — semantics unconfirmed.
-//! * `getSocDecimal`, `getSocDecimalRate` — the adapter reads these outside
-//!   `ChargerInfo`, so they are not part of this snapshot.
+//! * `getPSValue` — semantics unconfirmed.
 //! * `getTxAdapt` — `wireless_master/tx_adapter`, no field.
 //! * `getWirelessFwStatus`, `getWirelessReverseStatus` — no matching fields.
 //! * `getMiChargePath` / `get*CommonInfo` — generic key/value accessors, unused.
 //!
-//! `usb_online` has no getter at all; it is derived from `usb/voltage_now`
-//! (non-zero only while a USB source is attached). `ac_online`, `battery_status`
-//! and `battery_health` are likewise unsourced and keep their previous value.
+//! `usb_online` has no getter; it is derived from `usb/voltage_now` (non-zero
+//! only while a USB source is attached). `ac_online`, `battery_status` and
+//! `battery_health` have no HAL getter either and are read from their kernel
+//! nodes in the supplemental stage.
+//!
+//! `getSocDecimal` / `getSocDecimalRate` are collected but not served: their node
+//! is not the one the official decimal-SOC contract names, and its scale is
+//! unconfirmed. See `get_decimal_soc` for the full reasoning.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -108,6 +120,27 @@ use super::ChargeBackend;
 
 /// Service instance registered by the Xiaomi vendor HAL.
 pub const MICHARGE_SERVICE_NAME: &str = "vendor.xiaomi.hardware.micharge.IMiCharge/default";
+
+/// Snapshot fields the vendor HAL exposes no dedicated getter for, filled from
+/// nodes the HAL itself reads.
+///
+/// Paths and evidence grades come from `chargehal-vendor-refs/HAL-NODES.md`,
+/// which was extracted from the HAL binary. Grades:
+///
+/// * `A` — Android `power_supply` ABI fixes the unit, safe to read as-is.
+/// * `C` — private `xm_power` node, unit unconfirmed; copied verbatim and never
+///   scaled, so a wrong guess can never enter the snapshot.
+///
+/// These nodes are specific to the AIDL V2 generation. On other kernels the
+/// reads simply fail and the previous value is kept.
+const CHARGE_COUNTER: &str = "/sys/class/power_supply/battery/charge_counter"; // A, µAh
+const CHARGE_FULL_DESIGN: &str = "/sys/class/power_supply/battery/charge_full_design"; // A, µAh
+const FG_MASTER_VBATT: &str = "/sys/class/xm_power/fg_master/vbatt"; // C
+const FG_SLAVE_VBATT: &str = "/sys/class/xm_power/fg_slave/vbatt"; // C
+const FG_MASTER_RM: &str = "/sys/class/xm_power/fg_master/rm"; // C
+const FG_MASTER_BATT_SN: &str = "/sys/class/xm_power/fg_master/batt_sn"; // C, text
+const CONNECTOR_TEMP_1: &str = "/sys/class/xm_power/hw_monitor/connector/connector_temp_1"; // C
+const CONNECTOR_TEMP_2: &str = "/sys/class/xm_power/hw_monitor/connector/connector_temp_2"; // C
 
 /// Flips to `false` when the vendor HAL process dies.
 struct MiChargeDeath {
@@ -125,7 +158,6 @@ impl DeathRecipient for MiChargeDeath {
 struct ProbeSnapshot {
     initialized: bool,
     dp_connected: bool,
-    capacity: String,
     quick_charge_type: String,
     power_max: String,
 }
@@ -207,6 +239,11 @@ impl ChargeBackend for MiChargeBackend {
         }
         let Some(proxy) = self.proxy() else {
             tracing::warn!("MiCharge HAL proxy unavailable; falling back to sysfs refresh");
+            // Drop HAL-only telemetry, otherwise a value from the last successful
+            // HAL cycle would survive into the fallback path and be reported as
+            // if it were current. The fallback backend never writes these fields.
+            info.soc_decimal.clear();
+            info.soc_decimal_rate.clear();
             return self.fallback.refresh(info, should_cancel);
         };
 
@@ -286,16 +323,14 @@ impl ChargeBackend for MiChargeBackend {
             info.usb_voltage_now = voltage;
             info.usb_online = if voltage > 0 { 1 } else { 0 };
         }
+        // `getPdApdoMax` is deliberately not used as a power fallback: its node
+        // carries a PDO/APDO index or a voltage/current pair, not a wattage, so
+        // running it through the watt normaliser would invent a number. Keeping
+        // the previous value beats that.
         apply_power_w(
             &mut info.adapter_power_w,
             fetch(&*proxy, |p| p.getChargingPowerMax()).as_deref(),
         );
-        if info.adapter_power_w == 0 {
-            apply_power_w(
-                &mut info.adapter_power_w,
-                fetch(&*proxy, |p| p.getPdApdoMax()).as_deref(),
-            );
-        }
         apply_string(
             &mut info.wireless_type,
             fetch(&*proxy, |p| p.getCarChargingType()).as_deref(),
@@ -306,19 +341,73 @@ impl ChargeBackend for MiChargeBackend {
         }
 
         // ── Typec / wireless stage ──
+        //
+        // `getWirelessChargingStatus` is deliberately not used here: on every
+        // generation it reads the reverse-charging mode node, not a wireless
+        // power-supply online flag (`getWirelessReverseStatus` reads the very
+        // same node). Writing it into `wireless_online` made an active
+        // reverse-charge session look like incoming wireless power, which can
+        // surface a fast-charge badge. Wireless online comes from the kernel
+        // node in the supplemental stage below.
+
+        // ── Telemetry the HAL exposes beyond what the snapshot consumed before ──
+        //
+        // `getSocDecimal` / `getSocDecimalRate` are COLLECTED BUT NOT SERVED.
+        // `get_decimal_soc` deliberately does not return them (see the comment
+        // there): the node differs from the one the official contract names
+        // (/proc/ui_soc_decimal) and its scale is unconfirmed, so serving it could
+        // inject a 10× error under a call specified for a different node. They
+        // surface through `build_soh_debug_info` instead, so a device reading can
+        // calibrate them before anything is wired to the wire contract.
+        apply_string(
+            &mut info.soc_decimal,
+            fetch(&*proxy, |p| p.getSocDecimal()).as_deref(),
+        );
+        apply_string(
+            &mut info.soc_decimal_rate,
+            fetch(&*proxy, |p| p.getSocDecimalRate()).as_deref(),
+        );
+        // Smart-battery switch state: private node, unconfirmed scale, used as a
+        // flag only.
         apply_int(
-            &mut info.wireless_online,
-            fetch(&*proxy, |p| p.getWirelessChargingStatus()).as_deref(),
+            &mut info.smart_batt,
+            fetch(&*proxy, |p| p.getSBState()).as_deref(),
         );
 
         if should_cancel() {
             return false;
         }
-
-        // 补充读取 HAL 未覆盖的标准 power_supply 属性
+        // Supplemental reads for attributes the vendor HAL exposes no getter for.
+        // Two groups with different provenance — do not blur them:
+        //
+        //   Group 1 — the HAL itself reads these nodes (each verified against the
+        //             171 node inventory in chargehal-vendor-refs/HAL-NODES.md).
+        //   Group 2 — the HAL reads nothing of the sort; these are the bridge's
+        //             own reads for capabilities the HAL does not expose, and
+        //             their presence on device is UNCONFIRMED.
+        //
+        // Grade: A = Android power_supply ABI fixes the unit; C = private
+        // xm_power node, unit unconfirmed — copied verbatim, never scaled, and a
+        // missing node leaves the previous value untouched.
+        //
+        // Group 1 (HAL-referenced): charge_counter(A), charge_full_design(A),
+        // cell1_vol(C), cell2_vol(C), fg_rm(C), batt_sn(C), usb_temp(C),
+        // connector_temp(C) — see the path constants above.
+        //
+        // Group 2 (bridge-local, not HAL-referenced): battery_status,
+        // battery_health, ac_online, wireless_online, pc_port_online.
+        //
+        // `usb_type` is deliberately NOT read. The only node that could carry it
+        // is power_supply/usb/usb_type (HAL-NODES.md §6) and its value domain —
+        // "SDP"/"CDP" versus a bare "USB" — is unverified. A bare "USB" fed into
+        // `is_data_port_usb_type` would classify every charger as a data port and
+        // suppress fast-charge reporting unconditionally. With no device to
+        // settle the domain, the data-port check relies on pc_port_online alone.
         let batt_status_path = format!("{}/status", crate::backend::sysfs::PSY_BATTERY);
         let batt_health_path = format!("{}/health", crate::backend::sysfs::PSY_BATTERY);
         let ac_online_path = format!("{}/online", crate::backend::sysfs::PSY_AC);
+        let wireless_online_path = format!("{}/online", crate::backend::sysfs::PSY_WIRELESS);
+        let dc_online_path = format!("{}/online", crate::backend::sysfs::PSY_DC);
         crate::backend::sysfs::update_non_empty_string_from_paths(
             &mut info.battery_status,
             &[&batt_status_path],
@@ -328,6 +417,42 @@ impl ChargeBackend for MiChargeBackend {
             &[&batt_health_path],
         );
         crate::backend::sysfs::update_int_from_paths(&mut info.ac_online, &[&ac_online_path]);
+        crate::backend::sysfs::update_int_from_paths(
+            &mut info.wireless_online,
+            &[&wireless_online_path, &dc_online_path],
+        );
+        crate::backend::sysfs::update_int_from_paths(
+            &mut info.pc_port_online,
+            crate::backend::sysfs::PC_PORT_ONLINE_PATHS,
+        );
+
+        // Group 1, A grade: standard power_supply nodes, units fixed by the ABI.
+        crate::backend::sysfs::update_int_from_paths(&mut info.charge_counter, &[CHARGE_COUNTER]);
+        crate::backend::sysfs::update_int_from_paths(
+            &mut info.charge_full_design,
+            &[CHARGE_FULL_DESIGN],
+        );
+        // Group 1, C grade: private nodes, verbatim only.
+        crate::backend::sysfs::update_int_from_paths(&mut info.cell1_vol, &[FG_MASTER_VBATT]);
+        crate::backend::sysfs::update_int_from_paths(&mut info.cell2_vol, &[FG_SLAVE_VBATT]);
+        crate::backend::sysfs::update_int_from_paths(&mut info.fg_rm, &[FG_MASTER_RM]);
+        // Mirror the node-reader path so both backends agree on the number. This
+        // does mix grades: an A-grade node being backfilled by a C-grade one. It
+        // is kept because the alternative is reporting 0, and the reader path
+        // does exactly the same.
+        if info.charge_counter == 0 {
+            info.charge_counter = info.fg_rm;
+        }
+        crate::backend::sysfs::update_non_empty_string_from_paths(
+            &mut info.batt_sn,
+            &[FG_MASTER_BATT_SN],
+        );
+        // Field assignment follows the reader path's convention (it maps the same
+        // two connector temperature nodes onto these same two fields); which node
+        // is "usb" versus "board" is not documented anywhere, so treat the split
+        // as inherited rather than proven.
+        crate::backend::sysfs::update_int_from_paths(&mut info.usb_temp, &[CONNECTOR_TEMP_1]);
+        crate::backend::sysfs::update_int_from_paths(&mut info.connector_temp, &[CONNECTOR_TEMP_2]);
 
         if should_cancel() {
             return false;
@@ -337,11 +462,20 @@ impl ChargeBackend for MiChargeBackend {
             info.usb_online != 0 || info.ac_online != 0 || info.wireless_online != 0;
         if !charger_online {
             crate::backend::sysfs::clear_fast_charge_session(info);
+        } else if crate::backend::sysfs::is_data_port(info) {
+            // A computer is on the other end of the cable: drop the stale
+            // fast-charge evidence so the classifier cannot promote it.
+            crate::backend::sysfs::suppress_fast_charge_evidence(info);
         }
 
         info.fast_charge_type = crate::backend::sysfs::classify_fast_charge(info);
         info.charge_technology = crate::backend::sysfs::classify_charge_technology(info);
         info.charge_state = crate::backend::sysfs::classify_charge_state(info);
+        // The estimator returns a positive input unchanged, so the stale
+        // estimate has to be cleared first or the value freezes after the first
+        // successful computation. The sysfs path gets this for free because
+        // read_int_any() yields 0 when the node is missing.
+        info.remaining_time = 0;
         info.remaining_time = crate::backend::sysfs::estimate_remaining_time_seconds(info);
 
         true
@@ -354,54 +488,60 @@ impl ChargeBackend for MiChargeBackend {
             return;
         };
         let value = if restrict { "1" } else { "0" };
-        // Input suspend is the real restrict switch on the AIDL V2 generation: it
-        // writes xm_power/charger/charge_interface/input_suspend.
+        // Input suspend is the only working restrict switch on the AIDL V2
+        // generation. The vendor HAL prepends "micharge all " and writes
+        // xm_power/charger/charge_interface/input_suspend.
         //
-        // setCoolModeState is kept because it is a real implementation on the
-        // HIDL generation, but on V2 the vendor service only logs
-        // "not support coolMode" and returns 0 without touching a node — its
-        // getter and setter even share one address. The call is harmless.
-        let calls = [
-            (
-                "setInputSuspendState",
-                fetch(&*proxy, |p| p.setInputSuspendState(value)),
-            ),
-            (
-                "setCoolModeState",
-                fetch(&*proxy, |p| p.setCoolModeState(value)),
-            ),
-        ];
-        for (name, result) in calls {
-            match result {
-                Some(0) => {}
-                Some(status) => tracing::warn!("MiCharge {name}({value}) returned {status}"),
-                None => {
-                    tracing::warn!("MiCharge {name}({value}) failed; trying sysfs fallback");
-                    self.fallback.set_charge_control(restrict);
-                }
+        // setCoolModeState is deliberately not called: disassembly shows it
+        // shares its address with the getter (0x25aa4), is 11 instructions long
+        // and only logs "not support coolMode", returning 0 without touching any
+        // node. Calling it would cost a binder round trip and nothing else.
+        match fetch(&*proxy, |p| p.setInputSuspendState(value)) {
+            Some(0) => {}
+            Some(status) => {
+                // The status comes back from the HAL's own node write, so the
+                // call did reach the HAL and it reported the write failing.
+                // Falling back to sysfs here would apply a *different* mechanism
+                // (threshold-based) for the same intent while the HAL path may
+                // have partially applied. Until the non-zero semantics are
+                // confirmed on a device, warn only.
+                tracing::warn!("MiCharge setInputSuspendState({value}) returned {status}");
+            }
+            None => {
+                // Transport failure: the call never reached the HAL, so the
+                // node path is the only way to honour the request.
+                tracing::warn!(
+                    "MiCharge setInputSuspendState({value}) failed; trying sysfs fallback"
+                );
+                self.fallback.set_charge_control(restrict);
             }
         }
     }
 
     fn power_source_changed(&self) -> bool {
-        // Cheap probe only: four light getters, no full snapshot. A missing or
-        // dead binder must escalate to fallback so the adapter can recover.
+        // Cheap probe only: three light getters, no full snapshot.
+        //
+        // Capacity is deliberately absent. It drifts upward while charging, so
+        // including it would escalate to a full scan on every percent and turn
+        // a quiet 5-second poll into a steady stream of binder round trips. The
+        // node reader's probe leaves it out for the same reason.
         let Some(proxy) = self.proxy() else {
-            return self.fallback.power_source_changed();
+            return true;
         };
-        let (Some(dp_connected), Some(capacity), Some(quick_charge_type), Some(power_max)) = (
+        let (Some(dp_connected), Some(quick_charge_type), Some(power_max)) = (
             fetch(&*proxy, |p| p.isDPConnected()),
-            fetch(&*proxy, |p| p.getBatteryCapacity()),
             fetch(&*proxy, |p| p.getQuickChargeType()),
             fetch(&*proxy, |p| p.getChargingPowerMax()),
         ) else {
-            return self.fallback.power_source_changed();
+            // A probe that cannot answer must escalate rather than report "no
+            // change": the latter would delay noticing a newly attached charger
+            // until the next poll timeout.
+            return true;
         };
 
         let current = ProbeSnapshot {
             initialized: true,
             dp_connected,
-            capacity,
             quick_charge_type,
             power_max,
         };

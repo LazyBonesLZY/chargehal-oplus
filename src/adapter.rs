@@ -254,6 +254,15 @@ pub struct ChargerInfo {
     pub fg_rm: i32,
     pub fg_rsoc: i32,
     pub fg_soh: i32,
+    /// Raw decimal-SOC text from the vendor HAL (`getSocDecimal`).
+    ///
+    /// Kept as a string because the scale of the private `strategy_fg/soc_decimal`
+    /// node is unconfirmed (×100 vs ×1000 cannot be told apart without a device)
+    /// and the official ColorOS contract for the decimal-SOC call is "the node
+    /// contents verbatim" anyway. Empty when the HAL backend is not in use.
+    pub soc_decimal: String,
+    /// Raw decimal-SOC rate text from the vendor HAL (`getSocDecimalRate`).
+    pub soc_decimal_rate: String,
     pub fg_cycle: i32,
     pub fg_qmax: i32,
     pub fg_ai: i32,
@@ -420,6 +429,8 @@ impl Default for ChargerInfo {
             fg_rm: 0,
             fg_rsoc: 0,
             fg_soh: 0,
+            soc_decimal: String::new(),
+            soc_decimal_rate: String::new(),
             fg_cycle: 0,
             fg_qmax: 0,
             fg_ai: 0,
@@ -1171,13 +1182,18 @@ impl Adapter {
             &info.gauge_type
         };
         format!(
-            "soh={};charge_full={};charge_full_design={};charge_counter={};fcc={};rm={};design_capacity={};qmax={};cycle={};battery_type={};gauge_type={};capacity={};temp={};status={};fg_soh={};fg_fcc={};fg_rm={};fg_rsoc={};fg_cycle={};fg_ai={};fg_qmax={};fg_vendor={};gauge_info={};die_temp={};remaining_time={};max_life_temp={};max_life_vol={};over_vol_dur={}",
+            "soh={};charge_full={};charge_full_design={};charge_counter={};fcc={};rm={};design_capacity={};qmax={};cycle={};battery_type={};gauge_type={};capacity={};temp={};status={};fg_soh={};fg_fcc={};fg_rm={};fg_rsoc={};fg_cycle={};fg_ai={};fg_qmax={};fg_vendor={};gauge_info={};die_temp={};remaining_time={};max_life_temp={};max_life_vol={};over_vol_dur={};soc_decimal={};soc_decimal_rate={};smart_batt={};usb_temp={};connector_temp={}",
             soh, fcc_mah, design_mah, Self::best_charge_counter_mah(info), fcc_mah, rm_mah, design_mah, qmax_mah,
             cycle, battery_type, gauge_type, info.battery_capacity, info.battery_temp, info.battery_status,
             info.fg_soh, info.fg_fcc, info.fg_rm, info.fg_rsoc, info.fg_cycle,
             info.fg_ai, info.fg_qmax, info.fg_vendor, info.gauge_info,
             info.die_temperature, info.remaining_time,
-            info.max_life_temp, info.max_life_vol, info.over_vol_duration
+            info.max_life_temp, info.max_life_vol, info.over_vol_duration,
+            // Collected from the vendor HAL but not served over the wire yet;
+            // surfaced here so the value is observable without changing the
+            // decimal-SOC contract. See `get_decimal_soc`.
+            info.soc_decimal, info.soc_decimal_rate,
+            info.smart_batt, info.usb_temp, info.connector_temp
         )
     }
 
@@ -1314,6 +1330,18 @@ impl Adapter {
         Self::best_cycle(&self.info.lock())
     }
     pub fn get_decimal_soc(&self) -> String {
+        // `info.soc_decimal` holds the vendor HAL's raw decimal-SOC text and is
+        // deliberately NOT returned here. Two reasons, both from evidence:
+        //
+        // 1. It is not the node the official OPlus HAL reads. That one is
+        //    /proc/ui_soc_decimal; the HAL reads strategy_fg/soc_decimal. Serving
+        //    one node's text under a call specified for another is a guess.
+        // 2. Its scale is unconfirmed — ×100 vs ×1000 cannot be told apart
+        //    without a device (HAL-GETTER-SPEC.md), so it could be off by 10×.
+        //
+        // The synthesised pair below at least has a known shape and is what the
+        // node-reader backend produces, so both backends stay consistent. The
+        // collected value is surfaced through `build_soh_debug_info` instead.
         if !self.get_fast_charge_snapshot().online {
             return "0,0".into();
         }
