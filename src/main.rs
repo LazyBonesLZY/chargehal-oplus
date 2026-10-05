@@ -123,7 +123,10 @@ impl ChargerBinderService {
             33 => Self::int_string(self.adapter.get_battery_rm()),
             37 => self.adapter.reverse_chg_info.lock().clone(),
             40 => String::new(),
-            _ => "0".into(),
+            // The official implementation reports "-1" when the flag has no
+            // handler in its get table; "0" would encode "unsupported" as a
+            // legitimate numeric value.
+            _ => "-1".into(),
         }
     }
 
@@ -378,7 +381,10 @@ impl ICharger for ChargerBinderService {
     }
 
     fn getWirelessTXEnable(&self) -> BinderResult<String> {
-        Ok("disable".into())
+        // The official implementation reads an OPPO-only proc node that this HAL
+        // never touches. Returning a synthesised "disable" claimed a reading we
+        // do not have.
+        Ok(String::new())
     }
 
     fn queryChargeInfo(&self) -> BinderResult<String> {
@@ -420,13 +426,16 @@ impl ICharger for ChargerBinderService {
     }
 
     fn setChgConfig(&self, flag: i32, extra: &str, _callerName: i32) -> BinderResult<i32> {
+        // The official implementation answers -1 for a flag with no handler in
+        // its set table, so a caller can tell "applied" from "no such flag".
+        // Answering 0 for everything made a dropped write look like a success.
         match flag {
             5 => self.adapter.set_charge_limit_value(extra),
             14 => self.adapter.set_charge_limit_state(extra),
             19 => *self.adapter.anti_expansion_dis.lock() = extra.to_string(),
             25 => self.adapter.set_bypass_charge_status(extra),
             36 => *self.adapter.reverse_chg_info.lock() = extra.to_string(),
-            _ => {}
+            _ => return Ok(-1),
         }
         Ok(0)
     }
@@ -437,10 +446,23 @@ impl ICharger for ChargerBinderService {
 
     fn setUsbEyeDiagram(
         &self,
-        _model: i32,
+        model: i32,
         eyeDiagram: &str,
         _isDefaultEyeDiagram: bool,
     ) -> BinderResult<i32> {
+        // Mirrors the official validation: the payload is a `#`-separated pair
+        // whose first field is a known platform tag, and only model 0 is
+        // accepted. Anything else is rejected instead of being stored and later
+        // handed back as if it were a reading.
+        let mut fields = eyeDiagram.split('#');
+        let tag = fields.next().unwrap_or_default();
+        let known_tag = matches!((tag.len(), tag), (3, "mtk") | (4, "qcom") | (8, "unknown"));
+        if fields.next().is_none() || !known_tag {
+            return Ok(-1);
+        }
+        if model != 0 {
+            return Err(rsbinder::status::ExceptionCode::UnsupportedOperation.into());
+        }
         *self.adapter.usb_eye_diagram.lock() = eyeDiagram.to_string();
         Ok(0)
     }
