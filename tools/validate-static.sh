@@ -3,7 +3,7 @@
 set -eu
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-BIN="${1:-$ROOT/dist/vendor.oplus.hardware.charger-V6-service}"
+BIN="${1:-$ROOT/dist/vendor.oplus.hardware.charger-V11-service}"
 
 ADAPTER="$ROOT/src/adapter.rs"
 SYSFS="$ROOT/src/backend/sysfs.rs"
@@ -22,7 +22,7 @@ INTERFACE_VERSION="$(sed -n 's/^pub const INTERFACE_VERSION: i32 = \([0-9][0-9]*
 VINTF_VERSION="$(sed -n 's/^[[:space:]]*<version>\([0-9][0-9]*\)<\/version>.*$/\1/p' "$ROOT/charger-hal-service.xml")"
 [ -n "$INTERFACE_VERSION" ]
 [ "$INTERFACE_VERSION" = "11" ]
-[ "$VINTF_VERSION" = "6" ]
+[ "$VINTF_VERSION" = "11" ]
 
 if ! rg -q '^rsbinder = \{ version = "=0\.10\.0", features = \["android_10_plus"\] \}$' "$ROOT/Cargo.toml" \
     || ! rg -q '^rsbinder-aidl = "=0\.10\.0"$' "$ROOT/Cargo.toml"; then

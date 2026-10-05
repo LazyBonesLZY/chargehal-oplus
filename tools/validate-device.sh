@@ -7,7 +7,7 @@ CYCLES="${1:-10}"
 MAX_WAKE_MS="${MAX_WAKE_MS:-1000}"
 REQUIRE_CHARGING="${REQUIRE_CHARGING:-0}"
 SERVICE_NAME="vendor.oplus.hardware.charger.ICharger/default"
-PROCESS_NAME="vendor.oplus.hardware.charger-V6-service"
+PROCESS_NAME="vendor.oplus.hardware.charger-V11-service"
 
 case "$CYCLES:$MAX_WAKE_MS" in
     *[!0-9:]*|0:*|*:0)

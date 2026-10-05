@@ -2,8 +2,8 @@
 // Run `ANDROID_NDK_HOME=<ndk> ./build.sh release` before invoking Soong.
 
 cc_prebuilt_binary {
-    name: "vendor.oplus.hardware.charger-V6-service",
-    srcs: ["dist/vendor.oplus.hardware.charger-V6-service"],
+    name: "vendor.oplus.hardware.charger-V11-service",
+    srcs: ["dist/vendor.oplus.hardware.charger-V11-service"],
     device_specific: true,
     relative_install_path: "hw",
     strip: {

@@ -47,7 +47,7 @@ else
     "$CARGO_BIN" build --target aarch64-linux-android
     BIN="target/aarch64-linux-android/debug/vendor-oplus-hardware-charger-service"
 fi
-OUT_BIN="$(dirname "$BIN")/vendor.oplus.hardware.charger-V6-service"
+OUT_BIN="$(dirname "$BIN")/vendor.oplus.hardware.charger-V11-service"
 DIST_DIR="$SCRIPT_DIR/dist"
 
 if [ "$PROFILE" = "release" ]; then
@@ -56,14 +56,14 @@ if [ "$PROFILE" = "release" ]; then
 fi
 cp "$BIN" "$OUT_BIN"
 mkdir -p "$DIST_DIR"
-cp "$OUT_BIN" "$DIST_DIR/vendor.oplus.hardware.charger-V6-service"
+cp "$OUT_BIN" "$DIST_DIR/vendor.oplus.hardware.charger-V11-service"
 cp "$SCRIPT_DIR/charger-hal-service.rc" "$DIST_DIR/charger-hal-service.rc"
 cp "$SCRIPT_DIR/charger-hal-service.xml" "$DIST_DIR/charger-hal-service.xml"
-chmod 0755 "$DIST_DIR/vendor.oplus.hardware.charger-V6-service"
+chmod 0755 "$DIST_DIR/vendor.oplus.hardware.charger-V11-service"
 (
     cd "$DIST_DIR"
     sha256sum \
-        vendor.oplus.hardware.charger-V6-service \
+        vendor.oplus.hardware.charger-V11-service \
         charger-hal-service.rc \
         charger-hal-service.xml > SHA256SUMS
 )
@@ -73,4 +73,4 @@ ls -lh "$BIN"
 file "$BIN"
 echo "==> ROM replacement: $OUT_BIN"
 ls -lh "$OUT_BIN"
-echo "==> Soong prebuilt: $DIST_DIR/vendor.oplus.hardware.charger-V6-service"
+echo "==> Soong prebuilt: $DIST_DIR/vendor.oplus.hardware.charger-V11-service"

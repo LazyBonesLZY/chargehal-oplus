@@ -5,7 +5,7 @@
 /dist/
 
 # Locally built or downloaded device binaries
-/vendor.oplus.hardware.charger-V6-service-sdk*
+/vendor.oplus.hardware.charger-V11-service-sdk*
 *.apk
 *.img
 *.zip

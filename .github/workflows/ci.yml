@@ -76,7 +76,7 @@ jobs:
           ./build.sh release
 
       - name: Validate Android binary
-        run: ./tools/validate-static.sh dist/vendor.oplus.hardware.charger-V6-service
+        run: ./tools/validate-static.sh dist/vendor.oplus.hardware.charger-V11-service
 
       # One release per build, tagged with the short SHA, carrying the three
       # files a ROM integrator needs: the service binary, the init .rc and the
@@ -92,14 +92,14 @@ jobs:
           TAG="snapshot-$SHA"
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" --clobber \
-              dist/vendor.oplus.hardware.charger-V6-service \
+              dist/vendor.oplus.hardware.charger-V11-service \
               dist/charger-hal-service.rc \
               dist/charger-hal-service.xml
           else
             gh release create "$TAG" --target "$GITHUB_SHA" \
               --title "Charger HAL snapshot $SHA" \
               --notes "Automated build of $SHA ($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/commit/$GITHUB_SHA): service binary (installs to /odm/bin/hw), init .rc, VINTF manifest. Not verified on a device." \
-              dist/vendor.oplus.hardware.charger-V6-service \
+              dist/vendor.oplus.hardware.charger-V11-service \
               dist/charger-hal-service.rc \
               dist/charger-hal-service.xml
           fi
