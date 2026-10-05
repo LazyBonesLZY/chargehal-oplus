@@ -584,7 +584,7 @@ impl Adapter {
             bypass_latch: Mutex::new(false),
             charge_control_active: Mutex::new(false),
             charge_control_update_lock: Mutex::new(()),
-            charge_control_applied: Mutex::new(Some(false)),
+            charge_control_applied: Mutex::new(None),
             cooldown: Mutex::new("0".into()),
             anti_expansion_dis: Mutex::new("0".into()),
             info: Mutex::new(info),
@@ -840,7 +840,10 @@ impl Adapter {
             return currently_active;
         };
         if currently_active {
-            capacity > limit.saturating_sub(CHARGE_LIMIT_HYSTERESIS_PERCENT)
+            // Release only once the pack is a full step below the limit.
+            // Comparing with `>` against `limit - H` collapses the two
+            // thresholds into one and the latch flips on every poll.
+            capacity >= limit.saturating_sub(CHARGE_LIMIT_HYSTERESIS_PERCENT).max(1)
         } else {
             capacity >= limit
         }
@@ -1595,7 +1598,9 @@ mod tests {
         assert!(Adapter::charge_limit_latch_state(false, true, 95, Some(95)));
         assert!(Adapter::charge_limit_latch_state(true, true, 95, Some(95)));
         assert!(Adapter::charge_limit_latch_state(true, true, 90, Some(90)));
-        assert!(!Adapter::charge_limit_latch_state(true, true, 89, Some(90)));
+        // One full step of hysteresis below the limit, not zero.
+        assert!(Adapter::charge_limit_latch_state(true, true, 89, Some(90)));
+        assert!(!Adapter::charge_limit_latch_state(true, true, 88, Some(90)));
         assert!(!Adapter::charge_limit_latch_state(
             true,
             false,

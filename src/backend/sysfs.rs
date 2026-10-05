@@ -367,7 +367,6 @@ pub const BATTERY_TYPE_PATHS: &[&str] = &[
 ];
 pub const INPUT_CURRENT_MAX_PATHS: &[&str] = &[
     "/sys/class/qcom-battery/fg1_current_max",
-    "/sys/class/qcom-battery/constant_power",
     "/sys/class/qcom-battery/restrict_cur",
     "/sys/class/power_supply/usb_main/constant_charge_current_max",
     "/sys/class/power_supply/usb/current_max",
