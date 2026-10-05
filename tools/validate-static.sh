@@ -251,13 +251,13 @@ fi
 # sticks, and the framework closes bypass charging the moment it stops seeing a
 # charger. Both node-driven paths must limit the current instead.
 
-HIDL_CTRL="$(sed -n '/fn set_charge_control/,/^    }/p' "$ROOT/src/backend/hidl.rs")"
+HIDL_CTRL="$(sed -n '/fn set_charge_control/,/^    }/p' "$ROOT/src/backend/hidl.rs" | rg -v '^[[:space:]]*//')"
 [ -n "$HIDL_CTRL" ] || fail "hidl set_charge_control not found; the charge-control assertion went stale"
 if printf '%s\n' "$HIDL_CTRL" | rg 'INPUT_SUSPEND'; then
     fail "hidl charge control writes input_suspend: the charger drops offline and bypass charging is closed"
 fi
 
-SYSFS_CTRL="$(sed -n '/pub fn apply_charge_control_limit/,/^}/p' "$SYSFS")"
+SYSFS_CTRL="$(sed -n '/pub fn apply_charge_control_limit/,/^}/p' "$SYSFS" | rg -v '^[[:space:]]*//')"
 [ -n "$SYSFS_CTRL" ] || fail "apply_charge_control_limit not found; the charge-control assertion went stale"
 if printf '%s\n' "$SYSFS_CTRL" | rg 'INPUT_SUSPEND'; then
     fail "apply_charge_control_limit writes input_suspend: the charger drops offline and bypass charging is closed"
@@ -266,7 +266,7 @@ if ! printf '%s\n' "$SYSFS_CTRL" | rg -q 'NIGHT_CHARGING'; then
     fail "apply_charge_control_limit no longer drives the no-charge gate; the current limit alone still charges the pack"
 fi
 
-MICHARGE_CTRL="$(sed -n '/fn set_charge_control/,/^    }/p' "$MICHARGE")"
+MICHARGE_CTRL="$(sed -n '/fn set_charge_control/,/^    }/p' "$MICHARGE" | rg -v '^[[:space:]]*//')"
 [ -n "$MICHARGE_CTRL" ] || fail "micharge set_charge_control not found; the assertion went stale"
 if printf '%s\n' "$MICHARGE_CTRL" | rg 'setInputSuspendState'; then
     fail "micharge charge control suspends the input: the charger drops offline and bypass charging is closed"
